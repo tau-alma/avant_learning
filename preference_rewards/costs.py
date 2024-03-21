@@ -78,7 +78,6 @@ class EmpiricalCost(Cost):
         )
 
         C = discounts * (self.goal_dist_weight * goal_dist + goal_heading * radius_scaler + e_perp)
-
         return C.sum(dim=1)
 
     def _terminal_cost(self, x_values: torch.Tensor, u_values: torch.Tensor, p_values: torch.Tensor) -> torch.Tensor:
@@ -94,13 +93,17 @@ class EmpiricalCost(Cost):
         return C
 
     def forward(self, x_values: torch.Tensor, u_values: torch.Tensor, p_values: torch.Tensor) -> torch.Tensor:
-        return self._stage_cost(x_values, u_values, p_values) + self._terminal_cost(x_values, u_values, p_values)
+        stage_cost = self._stage_cost(x_values, u_values, p_values)
+        terminal_cost = self._terminal_cost(x_values, u_values, p_values)
+        return stage_cost + terminal_cost
     
     
 class InfoCost(Cost):
     def __init__(self, N, device="cuda:0"):
         super().__init__()
         self.empirical_cost = EmpiricalCost(N, device)
+        self.empirical_cost.init_test_weights()
+        self.empirical_cost.to(device)
 
     def generate_p(self, x0: torch.Tensor) -> torch.Tensor:
         return self.empirical_cost.generate_p(x0)
@@ -108,11 +111,18 @@ class InfoCost(Cost):
     def forward(self, x_values: torch.Tensor, u_values: torch.Tensor, p_values: torch.Tensor) -> torch.Tensor:
         # X = M x N x 2*n_states
         # U = M x N x 2*n_controls
-        #
-        
+        M = x_values.shape[0]
+        n_states = int(x_values.shape[2] / 2)
+        n_controls = int(u_values.shape[2] / 2)
+        stacked_x_values = torch.vstack([x_values[:, :, :n_states], x_values[:, :, n_states:]])
+        stacked_u_values = torch.vstack([u_values[:, :, :n_controls], u_values[:, :, n_controls:]])
 
-        costA, costB = 0
+        # 2*M x N costs
+        stacked_costs = self.empirical_cost(stacked_x_values, stacked_u_values, p_values).unsqueeze(1)
 
-        info_gain = information_gain(costA, costB)
+        traj_A_cost = stacked_costs[:M, None, :]
+        traj_B_cost = stacked_costs[M:, None, :]
+
+        info_gain = information_gain(traj_A_cost, traj_B_cost)
         
-        raise NotImplementedError()
+        return info_gain

@@ -49,18 +49,36 @@ def information_gain(trajA_costs: torch.Tensor, trajB_costs: torch.Tensor) -> to
     Returns:
     - An N-element tensor containing the information gain for each trajectory pair.
     """
+
+    print("gosts", trajA_costs, trajB_costs)
+
+    assert trajA_costs.amin().item() >= 0 and trajB_costs.amin().item() >= 0
+
+    max_A = trajA_costs.amax()
+    max_B = trajB_costs.amax()
+    scaler = torch.amax(torch.vstack([max_A, max_B]))
+
+    trajA_costs /= scaler
+    trajB_costs /= scaler
+
+    print("gosts 2", trajA_costs, trajB_costs)
+
     # Calculate preference probabilities for both orders
     pref_prob_a_b = preference_probability(trajA_costs, trajB_costs)
     pref_prob_b_a = preference_probability(trajB_costs, trajA_costs)
-    
+
+    print(pref_prob_a_b, pref_prob_b_a)
+
     # Sum the preference probabilities over all ensembles for each trajectory
-    pref_probs_sum_a = torch.sum(pref_prob_a_b, dim=0)
-    pref_probs_sum_b = torch.sum(pref_prob_b_a, dim=0)
+    pref_probs_sum_a = torch.sum(pref_prob_a_b, dim=1)
+    pref_probs_sum_b = torch.sum(pref_prob_b_a, dim=1)
     
     # Compute the log probabilities for each preference
     M = trajA_costs.size(0)
-    log_prob_a_b = torch.log2(M * pref_prob_a_b / pref_probs_sum_a)
-    log_prob_b_a = torch.log2(M * pref_prob_b_a / pref_probs_sum_b)
+    log_prob_a_b = torch.log2(M * pref_prob_a_b / (pref_probs_sum_a + 1e-9))
+    log_prob_b_a = torch.log2(M * pref_prob_b_a / (pref_probs_sum_b + 1e-9))
+
+    print(log_prob_a_b, log_prob_b_a)
     
     # Calculate the information gain for each preference
     info_gain_a = pref_prob_a_b * log_prob_a_b
@@ -68,8 +86,10 @@ def information_gain(trajA_costs: torch.Tensor, trajB_costs: torch.Tensor) -> to
     
     # Sum the information gain over all ensembles for each pair of trajectories
     info_gain = torch.sum(info_gain_a + info_gain_b, dim=0)
+
+    print(info_gain)
     
-    return info_gain
+    return info_gain.squeeze(1)
 
 
 def draw_2d_solution(x_values, u_values, p_values):

@@ -1,7 +1,7 @@
 import torch
 import numpy as np
-from dynamics import Dynamics, AvantDynamics
-from costs import Cost, EmpiricalCost
+from dynamics import Dynamics, DualAvantDynamics, AvantDynamics
+from costs import Cost, EmpiricalCost, InfoCost
 from evotorch import Problem, SolutionBatch
 from evotorch.algorithms import CMAES, CEM
 from evotorch.logging import StdOutLogger
@@ -48,7 +48,7 @@ class EvoTorchWrapper:
     def __init__(self, problem: Problem):
         self.problem = problem
 
-    def solve(self, popsize=50000, std=1, iters=100):
+    def solve(self, popsize=1, std=1, iters=100):
         self.problem.reset()
 
         # searcher = CMAES(self.problem, popsize=popsize, stdev_init=std, center_init=torch.zeros(self.problem.solution_length))
@@ -60,12 +60,9 @@ class EvoTorchWrapper:
         self.problem.visualize(best_discovered_solution)
 
     
-
 if __name__ == "__main__":
-    dynamics = AvantDynamics(dt=1/10)
-    cost = EmpiricalCost(N=30)
-    cost.init_test_weights()
-    cost = cost.cuda()
-    problem = InfoGainProblem(N=30, cost=cost, dynamics=dynamics)
+    dynamics = DualAvantDynamics(dt=1/10)
+    cost = InfoCost(N=40).cuda()
+    problem = InfoGainProblem(N=40, cost=cost, dynamics=dynamics)
     solver = EvoTorchWrapper(problem)
     solver.solve()
