@@ -2,6 +2,8 @@ import torch
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import truncnorm
+from matplotlib.widgets import Button
+from queue import Queue
 
 
 class TruncatedNormal:
@@ -27,14 +29,24 @@ def preference_probability(trajA_cost: torch.Tensor, trajB_cost: torch.Tensor) -
 def preference_loss(trajA_costs: torch.Tensor, trajB_costs: torch.Tensor, preference_labels: torch.Tensor):
     """
     Parameters:
-    - trajA_costs: Nx1 tensor, where N is the number of trajectory pairs
-    - trajB_costs: Nx1 tensor, where N is the number of trajectory pairs
-    - preference_labels: Nx2 tensor, where N is the number of trajectory pairs
+    - trajA_costs: length M tensor, where M is the number of trajectory pairs
+    - trajB_costs: length M tensor, where M is the number of trajectory pairs
+    - preference_labels: Mx2 tensor, where M is the number of trajectory pairs
     """
     assert len(preference_labels.shape) == 2 and (len(trajA_costs) == len(preference_labels) and len(trajB_costs) == len(preference_labels))
+    assert trajA_costs.amin().item() >= 0 and trajB_costs.amin().item() >= 0
+
+    # Normalize so we don't end up with NAN values due to exp(-big number):
+    max_A = trajA_costs.amax()
+    max_B = trajB_costs.amax()
+    scaler = torch.amax(torch.vstack([max_A, max_B]))
+    # Avoid in-place operations
+    norm_trajA_costs = trajA_costs / scaler
+    norm_trajB_costs = trajB_costs / scaler
+
     return -(
-        preference_labels[:, 0] * preference_probability(trajA_costs, trajB_costs) 
-        + preference_labels[:, 1] * preference_probability(trajB_costs, trajA_costs)
+        preference_labels[:, 0] * preference_probability(norm_trajA_costs, norm_trajB_costs) 
+        + preference_labels[:, 1] * preference_probability(norm_trajB_costs, norm_trajA_costs)
     )    
 
 
@@ -43,114 +55,116 @@ def information_gain(trajA_costs: torch.Tensor, trajB_costs: torch.Tensor) -> to
     Compute the information gain for each pair of trajectories.
     
     Parameters:
-    - trajA_costs: MxN tensor, where M is the number of cost function ensembles, and N is the number of trajectory pairs
-    - trajB_costs: MxN tensor, where M is the number of cost function ensembles, and N is the number of trajectory pairs
+    - trajA_costs: KxM tensor, where K is the number of cost function ensembles, and M is the number of trajectory pairs
+    - trajB_costs: KxM tensor, where K is the number of cost function ensembles, and M is the number of trajectory pairs
     
     Returns:
-    - An N-element tensor containing the information gain for each trajectory pair.
+    - An M-element tensor containing the information gain for each trajectory pair.
     """
-
-    print("gosts", trajA_costs, trajB_costs)
 
     assert trajA_costs.amin().item() >= 0 and trajB_costs.amin().item() >= 0
 
+    # Normalize so we don't end up with NAN values due to exp(-big number):
     max_A = trajA_costs.amax()
     max_B = trajB_costs.amax()
     scaler = torch.amax(torch.vstack([max_A, max_B]))
-
     trajA_costs /= scaler
     trajB_costs /= scaler
-
-    print("gosts 2", trajA_costs, trajB_costs)
 
     # Calculate preference probabilities for both orders
     pref_prob_a_b = preference_probability(trajA_costs, trajB_costs)
     pref_prob_b_a = preference_probability(trajB_costs, trajA_costs)
 
-    print(pref_prob_a_b, pref_prob_b_a)
-
     # Sum the preference probabilities over all ensembles for each trajectory
-    pref_probs_sum_a = torch.sum(pref_prob_a_b, dim=1)
-    pref_probs_sum_b = torch.sum(pref_prob_b_a, dim=1)
-    
+    pref_probs_sum_a = torch.sum(pref_prob_a_b, dim=0)
+    pref_probs_sum_b = torch.sum(pref_prob_b_a, dim=0)
+
     # Compute the log probabilities for each preference
     M = trajA_costs.size(0)
     log_prob_a_b = torch.log2(M * pref_prob_a_b / (pref_probs_sum_a + 1e-9))
     log_prob_b_a = torch.log2(M * pref_prob_b_a / (pref_probs_sum_b + 1e-9))
 
-    print(log_prob_a_b, log_prob_b_a)
-    
     # Calculate the information gain for each preference
     info_gain_a = pref_prob_a_b * log_prob_a_b
     info_gain_b = pref_prob_b_a * log_prob_b_a
     
     # Sum the information gain over all ensembles for each pair of trajectories
     info_gain = torch.sum(info_gain_a + info_gain_b, dim=0)
-
-    print(info_gain)
     
-    return info_gain.squeeze(1)
-
+    return info_gain
 
 def draw_2d_solution(x_values, u_values, p_values):
-    fig, axs = plt.subplots(1, 1, figsize=(10, 10))
+    num_paths = x_values.shape[0]  # Determine the number of paths.
 
-    # Extracting necessary data
-    x_positions = x_values[0, :, 0].numpy()
-    y_positions = x_values[0, :, 1].numpy()
-    front_link_angles = x_values[0, :, 2].numpy()
-    center_link_angles = x_values[0, :, 3].numpy()  # Center link angle in the machine frame
+    if x_values.shape[2] == 12:
+        x_values = torch.vstack([x_values[:, :, :6], x_values[:, :, 6:]])
+        num_paths = 2
 
-    velocities = x_values[0, :, 5].numpy()
-
-    # Calculate the arrow directions based on the heading angle for the front link
-    dx_front = np.cos(front_link_angles)
-    dy_front = np.sin(front_link_angles)
-
-    # Correctly adjust center link angles by adding π to the front link angles for global orientation,
-    # making the rear link point directly opposite when the center link angle is zero.
-    adjusted_center_link_angles = front_link_angles + center_link_angles + np.pi  # Adding π to reverse direction
-
-    # Calculate the direction vectors for the center links, applying a scale factor for length
-    dx_center = np.cos(adjusted_center_link_angles) * 0.1  # Example scale factor for visualization
-    dy_center = np.sin(adjusted_center_link_angles) * 0.1
-
-    # Velocity for color coding the quiver plot for x_values
-    norm = plt.Normalize(vmin=velocities.min(), vmax=velocities.max())
-    axs.quiver(x_positions, y_positions, dx_front, dy_front, velocities, cmap='viridis', norm=norm)
-
-    # Plotting center link lines using adjusted angles
-    for i in range(len(dx_center)):
-        axs.plot([x_positions[i], x_positions[i] + dx_center[i]], 
-                 [y_positions[i], y_positions[i] + dy_center[i]], 
-                 color='gray', linestyle='-', linewidth=2)
-
-    # Assuming p_values also has headings at index 2
-    dx_p = np.cos(p_values[:, 2].numpy())
-    dy_p = np.sin(p_values[:, 2].numpy())
-    axs.quiver(p_values[:, 0].numpy(), p_values[:, 1].numpy(), dx_p, dy_p, color='red')
+    fig, axs = plt.subplots(1, num_paths, figsize=(10 * num_paths, 10), squeeze=False)
     
-    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap="viridis"), ax=axs)
-    axs.scatter(x_positions[0], y_positions[0], color='red', marker='o')
-    axs.grid()
-    axs.autoscale_view()
-    axs.set_title('AFS machine visualization')
+    # Adjust margins for the subplots
+    plt.subplots_adjust(bottom=0.35)
 
-    plt.tight_layout()
+    # Prepare all positions including goals to calculate comprehensive limits
+    all_x_positions = np.concatenate([x_values[:, :, 0].numpy().flatten(), p_values[:, 0].numpy()])
+    all_y_positions = np.concatenate([x_values[:, :, 1].numpy().flatten(), p_values[:, 1].numpy()])
+    x_min, x_max = all_x_positions.min(), all_x_positions.max()
+    y_min, y_max = all_y_positions.min(), all_y_positions.max()
+
+    # Add a margin for visibility
+    x_margin = (x_max - x_min) * 0.05
+    y_margin = (y_max - y_min) * 0.05
+
+    for i in range(num_paths):
+        x_positions = x_values[i, :, 0].numpy()
+        y_positions = x_values[i, :, 1].numpy()
+        front_link_angles = x_values[i, :, 2].numpy()
+        center_link_angles = x_values[i, :, 3].numpy()
+        velocities = x_values[i, :, 5].numpy()
+
+        # Calculate direction for front link
+        dx_front = np.cos(front_link_angles)
+        dy_front = np.sin(front_link_angles)
+
+        # Calculate adjusted center link angles for direction lines
+        adjusted_center_link_angles = front_link_angles + center_link_angles + np.pi
+        dx_center = np.cos(adjusted_center_link_angles) * 0.1
+        dy_center = np.sin(adjusted_center_link_angles) * 0.1
+
+        norm = plt.Normalize(vmin=velocities.min(), vmax=velocities.max())
+        quiver = axs[0, i].quiver(x_positions, y_positions, dx_front, dy_front, velocities, cmap='viridis', norm=norm)
+
+        # Plotting center link direction lines
+        for j in range(len(x_positions)):
+            axs[0, i].plot([x_positions[j], x_positions[j] + dx_center[j]], 
+                            [y_positions[j], y_positions[j] + dy_center[j]], 
+                            color='gray', linestyle='-', linewidth=2)
+
+        # Plot goal positions with direction
+        axs[0, i].quiver(p_values[:, 0].numpy(), p_values[:, 1].numpy(), np.cos(p_values[:, 2].numpy()), np.sin(p_values[:, 2].numpy()), color='red', scale=50)
+        axs[0, i].scatter(x_positions[0], y_positions[0], color='red', marker='o')  # Start position
+
+        axs[0, i].set_xlim(x_min - x_margin, x_max + x_margin)
+        axs[0, i].set_ylim(y_min - y_margin, y_max + y_margin)
+        axs[0, i].grid()
+        axs[0, i].set_title(f'Path {i + 1}')
+
+    answer_que = Queue()
+    def on_key(event):
+        if event.key == 'left':
+            answer_que.put(torch.Tensor([1, 0]))
+            plt.close(fig)
+        elif event.key == 'right':
+            answer_que.put(torch.Tensor([0, 1]))
+            plt.close(fig)
+        elif event.key == 'up':
+            answer_que.put(torch.Tensor([1, 1]))
+            plt.close(fig)
+        elif event.key == 'down':
+            answer_que.put(torch.Tensor([0, 0]))
+            plt.close(fig)
+
+    fig.canvas.mpl_connect('key_press_event', on_key)
     plt.show()
-
-
-
-
-import time
-if __name__ == "__main__":
-    t1 = time.time_ns()
-
-    M, N = 5, 1000  # 5 cost function ensembles, 10 trajectories
-    trajA_costs = torch.randn(M, N)#.cuda()
-    trajB_costs = torch.randn(M, N)#.cuda()
-    ig = information_gain(trajA_costs, trajB_costs)
-    print(ig)
-
-    t2 = time.time_ns()
-    print(f"Took {(t2-t1)/1e6} ms")
+    answer = answer_que.get()
+    return answer
