@@ -24,7 +24,7 @@ class AvantDynamics(Dynamics):
         lbx = torch.tensor([-torch.inf, -torch.inf, -torch.inf, -config.avant_max_beta, -config.avant_max_dot_beta, config.avant_min_v]).to(device)
         ubx = torch.tensor([torch.inf, torch.inf, torch.inf, config.avant_max_beta, config.avant_max_dot_beta, config.avant_max_v]).to(device)
         super().__init__(dt, lbu=lbu, ubu=ubu, lbx=lbx, ubx=ubx)
-        self.device = device
+        
         # Define initial state sampling distribution:
         lbx_initial = torch.tensor([-20, -20, 0, -1e-5, -1e-5, -1e-5]).to(device)
         ubx_initial = torch.tensor([20, 20, 2*torch.pi, 1e-5, 1e-5, 1e-5]).to(device)

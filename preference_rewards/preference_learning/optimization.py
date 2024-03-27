@@ -15,7 +15,7 @@ class InfoGainProblem(Problem, ABC):
         self.dynamics = DualDynamics(dynamics=dynamics)
         self.cost = InfoCost(N=N, K=n_ensembles, cost_module=cost_module, parameters_path=parameters_path, device=device)
         self.dataset = dataset
-        self.dataloader = DataLoader(self.dataset, batch_size=1, sampler=BootstrapSampler(self.dataset))
+        self.dataloader = DataLoader(self.dataset, batch_size=1, sampler=BootstrapSampler(self.dataset))  # Note: only batch size = 1 works, need to align the shape of p_values in trainer for other batch sizes
 
         super().__init__(
             objective_sense="min",
@@ -28,7 +28,6 @@ class InfoGainProblem(Problem, ABC):
         self.x0 = None
         self.p = None
 
-    @abstractmethod
     def generate_p(self, x0: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError()
 
@@ -62,12 +61,12 @@ class EvoTorchWrapper:
     def __init__(self, problem: InfoGainProblem):
         self.problem = problem
 
-    def solve(self, popsize=int(1e6), parents=1e3, std=1, iters=50):
+    def solve(self, popsize=1e6, parents=1e3, std=1, iters=25):
         while True:
             self.problem.reset()
 
             # searcher = CMAES(self.problem, popsize=popsize, stdev_init=std, center_init=torch.zeros(self.problem.solution_length))
-            searcher = CEM(self.problem, parenthood_ratio=parents/popsize, popsize=popsize, stdev_init=std, center_init=torch.zeros(self.problem.solution_length))
+            searcher = CEM(self.problem, parenthood_ratio=parents/popsize, popsize=int(popsize), stdev_init=std, center_init=torch.zeros(self.problem.solution_length))
             logger = StdOutLogger(searcher, interval=10)
 
             searcher.run(iters)

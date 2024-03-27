@@ -28,7 +28,7 @@ def preference_loss(trajA_costs: torch.Tensor, trajB_costs: torch.Tensor, prefer
     - trajB_costs: length M tensor, where M is the number of trajectory pairs
     - preference_labels: Mx2 tensor, where M is the number of trajectory pairs
     """
-    assert len(preference_labels.shape) == 2 and (len(trajA_costs) == len(preference_labels) and len(trajB_costs) == len(preference_labels))
+    assert len(preference_labels.shape) in [2, 3] and (len(trajA_costs) == len(preference_labels) and len(trajB_costs) == len(preference_labels))
     assert trajA_costs.amin().item() >= 0 and trajB_costs.amin().item() >= 0
 
     # Normalize so we don't end up with NAN values due to exp(-big number):

@@ -50,7 +50,7 @@ class AvantEmpiricalCost(Cost):
             torch.tanh((perpendicular_dist - perpendicular_error_shift) * perpendicular_error_scaler) + 1
         )
 
-        C = discounts * (goal_dist_weight * goal_dist + goal_heading * radius_scaler + e_perp)
+        C = (discounts * (goal_dist_weight * goal_dist + goal_heading * radius_scaler + e_perp))**2
         return C.sum(dim=1)
 
     def _terminal_cost(self, x_values: torch.Tensor, p_values: torch.Tensor) -> torch.Tensor:
@@ -61,12 +61,12 @@ class AvantEmpiricalCost(Cost):
         heading_error_magnitude = 90 * torch.sigmoid(self.heading_error_magnitude)
         scaling_radius = (1 + 9 * torch.sigmoid(self.scaling_radius))
         goal_dist_weight = (1 + 9 * torch.sigmoid(self.goal_dist_weight))
-        
+
         goal_dist = (x_f - p_values[:, AvantInfoGainProblem.x_goal_idx])**2 + (y_f - p_values[:, AvantInfoGainProblem.y_goal_idx])**2
         goal_heading = heading_error_magnitude * (1 - torch.cos(p_values[:, AvantInfoGainProblem.theta_goal_idx] - theta_f))
         radius_scaler = torch.exp(-(goal_dist/scaling_radius)**2)
 
-        C = (goal_dist_weight * goal_dist + goal_heading * radius_scaler)
+        C = (goal_dist_weight * goal_dist + goal_heading * radius_scaler)**2
         return C
 
     def forward(self, x_values: torch.Tensor, p_values: torch.Tensor, return_terminal=False) -> torch.Tensor:

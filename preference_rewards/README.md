@@ -5,8 +5,8 @@ This module implements a modular framework for learning cost parameters using hu
 ### Implement system dynamics:
 ```python
 import torch
+import numpy as np
 from preference_learning.dynamics import Dynamics
-import cartpole_preferences.config as config
 
 
 # Implements a 4 state cartpole (x, theta, v, omega) that is controlled by the linear acceleration (a)
@@ -23,13 +23,13 @@ class CartPoleDynamics(Dynamics):
         lbu = torch.tensor([-2]).to(device)
         ubu = torch.tensor([2]).to(device)
         # Define state bounds, used for clamping the states:
-        lbx = torch.tensor([-10, torch.deg2rad(-90), -2, torch.deg2rad(-45)]).to(device)
-        ubx = torch.tensor([10, torch.deg2rad(90), 2, torch.deg2rad(45)]).to(device)
+        lbx = torch.tensor([-10, np.deg2rad(-90), -2, np.deg2rad(-45)]).to(device)
+        ubx = torch.tensor([10, np.deg2rad(90), 2, np.deg2rad(45)]).to(device)
         super().__init__(dt, lbu=lbu, ubu=ubu, lbx=lbx, ubx=ubx)
 
         # Define initial state sampling distribution:
-        lbx_initial = torch.tensor([-2.5, -torch.deg2rad(-22.5), -1e-5, -1e-5]).to(device)
-        ubx_initial = torch.tensor([2.5, torch.deg2rad(22.5), 1e-5, 1e-5]).to(device)
+        lbx_initial = torch.tensor([-2.5, np.deg2rad(-22.5), -1e-5, -1e-5]).to(device)
+        ubx_initial = torch.tensor([2.5, np.deg2rad(22.5), 1e-5, 1e-5]).to(device)
         self.sampler = torch.distributions.uniform.Uniform(lbx_initial, ubx_initial)
 
     def _discrete_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor, dt: float) -> torch.Tensor:
@@ -74,7 +74,7 @@ class CartPoleCost(Cost):
     def __init__(self, N: int, device: str):
         super().__init__()
 
-        # Define trainable weights:
+        # Define trainable weights (to ensure positive semidefinite cost these are interpreted as logarithms):
         params = [
             'x_weight',
             'theta_weight',
@@ -91,20 +91,20 @@ class CartPoleCost(Cost):
         theta = x_values[:, :, CartPoleDynamics.theta_idx]
         v = x_values[:, :, CartPoleDynamics.v_idx]
         omega = x_values[:, :, CartPoleDynamics.omega_idx]
-        C = (self.x_weight * x**2) + (self.theta_weight * theta**2) + (self.v_weight * v**2) + (self.omega_weight * omega)
-        return C
+        C = (torch.exp(self.x_weight) * x**2) + (torch.exp(self.theta_weight) * theta**2) + (torch.exp(self.v_weight) * v**2) + (torch.exp(self.omega_weight) * omega**2)
+        return C.sum(dim=1)
 
     def forward(self, x_values: torch.Tensor, p_values: torch.Tensor, return_terminal=False) -> torch.Tensor:
         stage_cost = self._cost(x_values[:, :-1, :], p_values)
-        terminal_cost = self._cost(x_values[:, -1, :], p_values)
+        terminal_cost = torch.zeros(x_values.shape[0]).to(x_values.device)
         if not return_terminal:
-            return stage_cost + terminal_cost
+            return stage_cost
         else:
-            return stage_cost + terminal_cost, terminal_cost
+            return stage_cost, terminal_cost
     
     # Return the parameter values, used for logging the mean/variance of our ensemble
     def get_parameters(self) -> Dict[str, float]:
-        params = {k: v.item() for k, v in self.state_dict().items()}
+        params = {k: torch.exp(v.item()) for k, v in self.state_dict().items()}
         return params
 ```
 

@@ -54,9 +54,9 @@ class InfoCost:
         traj_A_term = stacked_costs[:M, :].mean(dim=1)
         traj_B_term = stacked_costs[M:, :].mean(dim=1)
 
-        return -1e1*info_gain + (traj_A_term + traj_B_term)**2
+        return -1e2*info_gain + (traj_A_term + traj_B_term)**2
     
-    def training_loop(self, dataloader: DataLoader, n_epochs=10, lr=1e-1):
+    def training_loop(self, dataloader: DataLoader, n_epochs=10, lr=1e-2):
         for k, empirical_cost in enumerate(self.empirical_costs):
             print(f"Training empirical cost model {k+1}/{len(self.empirical_costs)}...")
             optimizer = torch.optim.Adam(empirical_cost.parameters(), lr=lr)
