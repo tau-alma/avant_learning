@@ -4,6 +4,7 @@ from preference_learning.dynamics import Dynamics
 
 
 class AvantDynamics(Dynamics):
+    # State indices:
     x_f_idx = 0
     y_f_idx = 1
     theta_f_idx = 2
@@ -11,17 +12,23 @@ class AvantDynamics(Dynamics):
     dot_beta_idx = 4
     v_f_idx = 5
 
+    # Control indices:
     dot_dot_beta_idx = 0
     a_f_idx = 1
 
     def __init__(self, dt: float, device: str):
+        # Define control bounds:
         lbu = torch.tensor([-config.avant_max_dot_dot_beta, -config.avant_max_a]).to(device)
         ubu = torch.tensor([config.avant_max_dot_dot_beta, config.avant_max_a]).to(device)
-        super().__init__(dt, lbu, ubu)
+        # Define state bounds:
+        lbx = torch.tensor([-torch.inf, -torch.inf, -torch.inf, -config.avant_max_beta, -config.avant_max_dot_beta, config.avant_min_v]).to(device)
+        ubx = torch.tensor([torch.inf, torch.inf, torch.inf, config.avant_max_beta, config.avant_max_dot_beta, config.avant_max_v]).to(device)
+        super().__init__(dt, lbu=lbu, ubu=ubu, lbx=lbx, ubx=ubx)
         self.device = device
-        self.lbx = torch.tensor([-20, -20, 0, -config.avant_max_beta, -config.avant_max_dot_beta, config.avant_min_v]).to(device)
-        self.ubx = torch.tensor([20, 20, 2*torch.pi, config.avant_max_beta, config.avant_max_dot_beta, config.avant_max_v]).to(device)
-        self.sampler = torch.distributions.uniform.Uniform(self.lbx, self.ubx)
+        # Define initial state sampling distribution:
+        lbx_initial = torch.tensor([-20, -20, 0, -1e-5, -1e-5, -1e-5]).to(device)
+        ubx_initial = torch.tensor([20, 20, 2*torch.pi, 1e-5, 1e-5, 1e-5]).to(device)
+        self.sampler = torch.distributions.uniform.Uniform(lbx_initial, ubx_initial)
 
     def _discrete_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor, dt: float) -> torch.Tensor:
         alpha = torch.pi + x_values[:, self.beta_idx]
@@ -38,48 +45,4 @@ class AvantDynamics(Dynamics):
 
     def generate_initial_state(self) -> torch.Tensor:
         x = self.sampler.sample()
-        # Adjust the initial beta based on dot beta (higher dot beta -> lower beta, to avoid inevitable constraint violations):
-        x[self.beta_idx] -= (config.avant_max_beta - x[self.beta_idx]) / (x[self.dot_beta_idx] / config.avant_max_dot_dot_beta)
-        x[3:] = 0
         return x
-    
-
-# Wrapper that parallelizes the optimization of two trajectories:
-class DualAvantDynamics(Dynamics):
-    def __init__(self, dt: float, device: str):
-        self.avant_dynamics = AvantDynamics(dt, device)
-        lbu = self.avant_dynamics.lbu.tile(2)
-        ubu = self.avant_dynamics.ubu.tile(2)
-        super().__init__(dt, lbu, ubu)
-
-    def _discrete_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor, dt: float) -> torch.Tensor:
-        # X = M x 2*n_states
-        # U = M x 2*n_controls
-        M = x_values.shape[0]
-        n_states = len(self.avant_dynamics.lbx)
-        n_controls = len(self.avant_dynamics.lbu)
-        stacked_x_values = torch.vstack([x_values[:, :n_states], x_values[:, n_states:]])
-        stacked_u_values = torch.vstack([u_values[:, :n_controls], u_values[:, n_controls:]])
-
-        stacked_next_states = self.avant_dynamics._discrete_dynamics_fun(stacked_x_values, stacked_u_values, dt)
-
-        unstacked_next_states = torch.hstack([stacked_next_states[:M, :], stacked_next_states[M:, :]])
-        return unstacked_next_states
-
-    def compute_constraint_violation(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
-        # X = M x N x 2*n_states
-        # U = M x N x 2*n_controls
-        M = x_values.shape[0]
-        n_states = len(self.avant_dynamics.lbx)
-        n_controls = len(self.avant_dynamics.lbu)
-        stacked_x_values = torch.vstack([x_values[:, :, :n_states], x_values[:, :, n_states:]])
-        stacked_u_values = torch.vstack([u_values[:, :, :n_controls], u_values[:, :, n_controls:]])
-        
-        stacked_total_violations = self.avant_dynamics.compute_constraint_violation(stacked_x_values, stacked_u_values)
-
-        unstacked_total_violations = torch.vstack([stacked_total_violations[:M], stacked_total_violations[M:]])
-        return unstacked_total_violations.sum(dim=0)
-
-    
-    def generate_initial_state(self) -> torch.Tensor:
-        return self.avant_dynamics.generate_initial_state().tile(2)

@@ -10,6 +10,7 @@ from avant_preferences.dynamics import AvantDynamics
 
 
 class AvantInfoGainProblem(InfoGainProblem):
+    # Parameter indices:
     x_goal_idx = 0
     y_goal_idx = 1
     theta_goal_idx = 2

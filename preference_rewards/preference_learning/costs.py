@@ -4,7 +4,7 @@ import os
 import json
 from torch.utils.data import DataLoader
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Type, Dict
 from preference_learning.utils import information_gain, preference_loss
 
 
@@ -21,7 +21,7 @@ class Cost(ABC, torch.nn.Module):
         raise NotImplementedError()
     
 class InfoCost:
-    def __init__(self, N: int, K: int, cost_module: Cost, parameters_path: str, device: str):
+    def __init__(self, N: int, K: int, cost_module: Type[Cost], parameters_path: str, device: str):
         super().__init__()
         self.empirical_costs = []
         for _ in range(K):
@@ -82,6 +82,7 @@ class InfoCost:
                     total_loss += loss.item()
 
                 print(f"Model {k+1}, epoch {epoch}, Total Loss: {total_loss}")
+            print()
 
         self._save_models()
         self._print_means()
@@ -91,8 +92,8 @@ class InfoCost:
         for k, empirical_cost in enumerate(self.empirical_costs):
             path = os.path.join(self.parameters_path, f"empirical_cost_{k}.pt")
             if os.path.isfile(path):
-                empirical_cost.load_state_dict(torch.load(path, map_location=self.device))
-                empirical_cost.to(self.device)
+                model_device = next(empirical_cost.parameters()).device
+                empirical_cost.load_state_dict(torch.load(path, map_location=model_device))
                 print(f"Loaded weights for empirical_cost_{k} from {path}")
             else:
                 print(f"No saved weights found for empirical_cost_{k} at {path}")

@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import DataLoader
 from abc import ABC, abstractmethod
-from preference_learning.dynamics import Dynamics
+from preference_learning.dynamics import Dynamics, DualDynamics
 from preference_learning.costs import Cost, InfoCost
 from preference_learning.training_data import TrajectoryDataset, BootstrapSampler
 from evotorch import Problem, SolutionBatch
@@ -12,15 +12,15 @@ from evotorch.logging import StdOutLogger
 class InfoGainProblem(Problem, ABC):
     def __init__(self, N: int, dynamics: Dynamics, cost_module: Cost, dataset: TrajectoryDataset, n_ensembles: int, parameters_path: str, device: str):
         self.N = N
-        self.dynamics = dynamics
+        self.dynamics = DualDynamics(dynamics=dynamics)
         self.cost = InfoCost(N=N, K=n_ensembles, cost_module=cost_module, parameters_path=parameters_path, device=device)
         self.dataset = dataset
         self.dataloader = DataLoader(self.dataset, batch_size=1, sampler=BootstrapSampler(self.dataset))
 
         super().__init__(
             objective_sense="min",
-            solution_length=N * len(dynamics.lbu),
-            initial_bounds=(dynamics.lbu.tile(N), dynamics.ubu.tile(N)),
+            solution_length=N * len(self.dynamics.lbu),
+            initial_bounds=(self.dynamics.lbu.tile(N), self.dynamics.ubu.tile(N)),
             dtype=torch.float32,
             device=device,
         )
@@ -54,7 +54,7 @@ class InfoGainProblem(Problem, ABC):
             u_values = solutions.values.view(-1, self.N, len(self.dynamics.lbu))
             x_values = self.dynamics.propagate(self.x0, u_values)
             C = self.cost.get_cost(x_values, self.p)
-            penalty = 1e2 * self.dynamics.compute_constraint_violation(x_values, u_values)
+            penalty = 1e2 * self.dynamics.compute_constraint_violation(u_values)
             solutions.set_evals(C + penalty)
 
 
