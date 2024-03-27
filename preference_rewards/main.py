@@ -1,5 +1,6 @@
 import argparse
 import torch
+from preference_learning.dynamics import DualDynamics
 from preference_learning.optimization import EvoTorchWrapper
 from preference_learning.training_data import TrajectoryDataset
 
@@ -21,11 +22,13 @@ if __name__ == "__main__":
 
     check_valid_device(args.device)
 
-    if args.problem == "avant":
-        from avant_preferences.dynamics import DualAvantDynamics
+    if args.problem == "cartpole":
+        pass
+    elif args.problem == "avant":
+        from avant_preferences.dynamics import AvantDynamics
         from avant_preferences.costs import AvantEmpiricalCost
         from avant_preferences.problem import AvantInfoGainProblem
-        dynamics = DualAvantDynamics(dt=args.dt, device=args.device)    
+        dynamics = AvantDynamics(dt=args.dt, device=args.device) 
         cost = AvantEmpiricalCost
         dataset = TrajectoryDataset(directory="avant_data")
         problem = AvantInfoGainProblem(N=args.N, cost_module=cost, dynamics=dynamics, dataset=dataset, n_ensembles=10, parameters_path="avant_parameters", device=args.device)
