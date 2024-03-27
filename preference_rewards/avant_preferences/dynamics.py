@@ -36,20 +36,6 @@ class AvantDynamics(Dynamics):
         ]).T
         return x_values + dt * dot_state
 
-    def compute_constraint_violation(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
-        # Compute absolute state violations
-        state_lower_violations = torch.clamp(self.lbx - x_values, min=0).sum(dim=[1, 2])
-        state_upper_violations = torch.clamp(x_values - self.ubx, min=0).sum(dim=[1, 2])
-        
-        # Compute absolute control violations
-        control_lower_violations = torch.clamp(self.lbu - u_values, min=0).sum(dim=[1, 2])
-        control_upper_violations = torch.clamp(u_values - self.ubu, min=0).sum(dim=[1, 2])
-
-        # Aggregate violations
-        total_violations = state_lower_violations + state_upper_violations + control_lower_violations + control_upper_violations
-
-        return total_violations
-
     def generate_initial_state(self) -> torch.Tensor:
         x = self.sampler.sample()
         # Adjust the initial beta based on dot beta (higher dot beta -> lower beta, to avoid inevitable constraint violations):
