@@ -45,8 +45,8 @@ def preference_loss(trajA_costs: torch.Tensor, trajB_costs: torch.Tensor, prefer
     norm_trajB_costs = trajB_costs / scaler
 
     return -(
-        preference_labels[:, 0] * preference_probability(norm_trajA_costs, norm_trajB_costs) 
-        + preference_labels[:, 1] * preference_probability(norm_trajB_costs, norm_trajA_costs)
+        preference_labels[:, 0] * torch.log(preference_probability(norm_trajA_costs, norm_trajB_costs)) 
+        + preference_labels[:, 1] * torch.log(preference_probability(norm_trajB_costs, norm_trajA_costs))
     )    
 
 
@@ -101,9 +101,6 @@ def draw_2d_solution(x_values, u_values, p_values):
         num_paths = 2
 
     fig, axs = plt.subplots(1, num_paths, figsize=(10 * num_paths, 10), squeeze=False)
-    
-    # Adjust margins for the subplots
-    plt.subplots_adjust(bottom=0.35)
 
     # Prepare all positions including goals to calculate comprehensive limits
     all_x_positions = np.concatenate([x_values[:, :, 0].numpy().flatten(), p_values[:, 0].numpy()])
@@ -114,6 +111,8 @@ def draw_2d_solution(x_values, u_values, p_values):
     # Add a margin for visibility
     x_margin = (x_max - x_min) * 0.05
     y_margin = (y_max - y_min) * 0.05
+
+    norm = plt.Normalize(vmin=x_values[:, :, 5].numpy().min(), vmax=x_values[:, :, 5].numpy().max())
 
     for i in range(num_paths):
         x_positions = x_values[i, :, 0].numpy()
@@ -131,7 +130,6 @@ def draw_2d_solution(x_values, u_values, p_values):
         dx_center = np.cos(adjusted_center_link_angles) * 0.1
         dy_center = np.sin(adjusted_center_link_angles) * 0.1
 
-        norm = plt.Normalize(vmin=velocities.min(), vmax=velocities.max())
         quiver = axs[0, i].quiver(x_positions, y_positions, dx_front, dy_front, velocities, cmap='viridis', norm=norm)
 
         # Plotting center link direction lines
@@ -148,6 +146,10 @@ def draw_2d_solution(x_values, u_values, p_values):
         axs[0, i].set_ylim(y_min - y_margin, y_max + y_margin)
         axs[0, i].grid()
         axs[0, i].set_title(f'Path {i + 1}')
+    
+    fig.subplots_adjust(right=0.85)
+    cbar_ax = fig.add_axes([0.9, 0.15, 0.03, 0.7])
+    fig.colorbar(quiver, cax=cbar_ax)
 
     answer_que = Queue()
     def on_key(event):

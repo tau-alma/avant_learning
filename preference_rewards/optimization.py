@@ -55,24 +55,25 @@ class EvoTorchWrapper:
     def __init__(self, problem: InfoGainProblem):
         self.problem = problem
 
-    def solve(self, popsize=int(1e6), std=1, iters=1):
+    def solve(self, popsize=int(1e6), parents=1e3, std=1, iters=50):
         while True:
             self.problem.reset()
 
             # searcher = CMAES(self.problem, popsize=popsize, stdev_init=std, center_init=torch.zeros(self.problem.solution_length))
-            searcher = CEM(self.problem, parenthood_ratio=0.001, popsize=popsize, stdev_init=std, center_init=torch.zeros(self.problem.solution_length))
+            searcher = CEM(self.problem, parenthood_ratio=parents/popsize, popsize=popsize, stdev_init=std, center_init=torch.zeros(self.problem.solution_length))
             logger = StdOutLogger(searcher, interval=10)
 
             searcher.run(iters)
-            best_discovered_solution = searcher.status["center"].clone().view(self.problem.N, len(self.problem.dynamics.lbu))
+            best_discovered_solution = searcher.status["pop_best"].values.clone().view(self.problem.N, len(self.problem.dynamics.lbu))
             self.problem.visualize(best_discovered_solution)
             self.problem.train()
 
     
 if __name__ == "__main__":
-    dynamics = DualAvantDynamics(dt=1/10)
-    cost = InfoCost(N=40, K=10).cuda()
+    N = 50
+    dynamics = DualAvantDynamics(dt=1/5)
+    cost = InfoCost(N=N, K=10).cuda()
     dataset = TrajectoryDataset("trajectories.pt")
-    problem = InfoGainProblem(N=40, cost=cost, dynamics=dynamics, dataset=dataset)
+    problem = InfoGainProblem(N=N, cost=cost, dynamics=dynamics, dataset=dataset)
     solver = EvoTorchWrapper(problem)
     solver.solve()

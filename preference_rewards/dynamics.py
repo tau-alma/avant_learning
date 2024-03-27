@@ -83,7 +83,7 @@ class AvantDynamics(Dynamics):
         x = self.sampler.sample()
         # Adjust the initial beta based on dot beta (higher dot beta -> lower beta, to avoid inevitable constraint violations):
         x[self.beta_idx] -= (config.avant_max_beta - x[self.beta_idx]) / (x[self.dot_beta_idx] / config.avant_max_dot_dot_beta)
-        # x[3:] = 0
+        x[3:] = 0
         return x
     
 
@@ -126,13 +126,3 @@ class DualAvantDynamics(Dynamics):
     
     def generate_initial_state(self) -> torch.Tensor:
         return self.avant_dynamics.generate_initial_state().tile(2)
-    
-
-
-if __name__ == "__main__":
-    a = torch.arange(20).reshape(5, 4)
-    print(a)
-    b = torch.vstack([a[:, :2], a[:, 2:]])
-    print(b)
-    c = torch.hstack([b[:5, :], b[5:, :]])
-    print(c)
