@@ -22,8 +22,15 @@ if __name__ == "__main__":
 
     check_valid_device(args.device)
 
-    if args.problem == "cartpole":
-        pass
+    if args.problem == "cartpole":        
+        from cartpole_preferences.dynamics import CartPoleDynamics
+        from cartpole_preferences.costs import CartPoleCost
+        from cartpole_preferences.problem import CartPoleInfoGainProblem
+        dynamics = CartPoleDynamics(dt=args.dt, device=args.device) 
+        cost = CartPoleCost
+        dataset = TrajectoryDataset(directory="cartpole_data")
+        problem = CartPoleInfoGainProblem(N=args.N, cost_module=cost, dynamics=dynamics, dataset=dataset, n_ensembles=10, parameters_path="cartpole_parameters", device=args.device)
+
     elif args.problem == "avant":
         from avant_preferences.dynamics import AvantDynamics
         from avant_preferences.costs import AvantEmpiricalCost
