@@ -65,7 +65,7 @@ class GoalEnv(ABC):
 
 
 class AvantGoalEnv(VecEnv, GoalEnv):
-    RENDER_RESOLUTION = 640
+    RENDER_RESOLUTION = 1280
 
     def __init__(self, num_envs: int, time_limit_s: float, device: str):
         self.num_envs = num_envs
@@ -153,13 +153,18 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         dist = np.sqrt((cx - x)**2 + (cy - y)**2)
         penalty = np.where(dist < PALET_RADIUS, 100*np.ones_like(dist), np.zeros_like(dist))
 
-        return -np.power(
+        reward = -np.power(
             np.dot(
                 np.abs(achieved_goal - desired_goal),
                 self.reward_weights,
             ),
             p,
-        ) - penalty
+        )
+
+        betas = np.asarray([info_d["beta"] for info_d in info])
+        penalty = np.where(reward > self.reward_target, penalty - 5*np.abs(betas), penalty)
+
+        return reward - penalty
 
     def step(self, actions):
         assert actions.dtype==np.float32
@@ -167,7 +172,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.states = self.dynamics.discrete_dynamics_fun(self.states, actions)
         self.num_steps += 1
 
-        info = [{} for _ in range(self.num_envs)]
+        betas = self.states[:, self.dynamics.beta_idx].cpu().numpy()
+        info = [{"beta": betas[i]} for i in range(self.num_envs)]
         tmp_obs = self._construct_observation(self.states)
         reward = self.compute_reward(tmp_obs["achieved_goal"], tmp_obs["desired_goal"], info)
 

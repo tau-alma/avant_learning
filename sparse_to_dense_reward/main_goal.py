@@ -18,11 +18,11 @@ env = AvantGoalEnv(1000, 30, "cuda:0")
 env = VecMonitor(env)
 env = VecNormalize(env)
 env = VecVideoRecorder(env, "./src/sparse_to_dense_reward/video", record_video_trigger=lambda x: x % 1000 == 0, video_length=1200)
+print(env.observation_space)
 
 # Create 2 artificial transitions per real transition
 n_sampled_goal = 2
 
-# SAC hyperparams:
 model = SAC(
     "MultiInputPolicy",
     env,
@@ -30,18 +30,19 @@ model = SAC(
     replay_buffer_kwargs=dict(
         n_sampled_goal=n_sampled_goal,
         goal_selection_strategy="future",
+        copy_info_dict=True
     ),
     verbose=1,
-    buffer_size=int(1e6),
+    buffer_size=int(2e6),
     learning_starts=1000*304,
     learning_rate=1e-3,
     gradient_steps=10,
-    gamma=0.99,
-    batch_size=10240,
-    policy_kwargs=dict(net_arch=dict(pi=[256, 256, 256], qf=[128, 96, 64, 32])),
+    gamma=0.999,
+    batch_size=102400,
+    policy_kwargs=dict(net_arch=dict(pi=[64, 64, 64, 64, 64], qf=[64, 64, 64, 64, 64])),
     tensorboard_log="./src/sparse_to_dense_reward/debug"
 )
-
-model.learn(50e6)
+# model = SAC.load("sac_vant", env=env)
+model.learn(20e6)
 model.save("sac_vant")
 
