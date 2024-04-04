@@ -9,7 +9,7 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Float64MultiArray
-from acados_solver import Solver
+from acados_mpc.acados_solver import AcadosSolver
 
 class AvantMPC(Node, ABC):
     def __init__(self):
@@ -29,7 +29,7 @@ class AvantMPC(Node, ABC):
 
         self.control_publisher = self.create_publisher(Float64MultiArray, '/motion_controller/commands', 10)
         self.horizon_publisher = self.create_publisher(Path, '/controller/horizon', 10)
-        timer_period = 0.02  # seconds (20 Hz)
+        timer_period = 0.02  # seconds (50 Hz)
         self.timer = self.create_timer(timer_period, self.solver_callback)
 
         self.odom_state = np.zeros(4) # x, y, theta, v
@@ -119,7 +119,7 @@ class AvantMPC(Node, ABC):
 class AcadosMPC(AvantMPC):
     def __init__(self):
         super().__init__()
-        self.solver = Solver(40, 1/10, 1/5)
+        self.solver = AcadosSolver(40, 1/10, 1/5)
 
     def solver_callback(self):
         t1 = time.time_ns()
@@ -140,7 +140,6 @@ class AcadosMPC(AvantMPC):
         solver_state0 = np.r_[odom_state[:3], self.joint_state, self.joint_velocity, odom_state[3]]
         self.solver.initialize(solver_state0, goal)
         state_horizon, control_horizon, success = self.solver.solve()
-        #self.get_logger().info(f"solver success {success}")
 
         self.process_solution(state_horizon)
 
