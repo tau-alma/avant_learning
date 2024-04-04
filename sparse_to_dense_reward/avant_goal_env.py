@@ -161,9 +161,6 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             p,
         )
 
-        betas = np.asarray([info_d["beta"] for info_d in info])
-        penalty = np.where(reward > self.reward_target, penalty - 5*np.abs(betas), penalty)
-
         return reward - penalty
 
     def step(self, actions):
@@ -172,8 +169,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.states = self.dynamics.discrete_dynamics_fun(self.states, actions)
         self.num_steps += 1
 
-        betas = self.states[:, self.dynamics.beta_idx].cpu().numpy()
-        info = [{"beta": betas[i]} for i in range(self.num_envs)]
+        info = [{} for i in range(self.num_envs)]
         tmp_obs = self._construct_observation(self.states)
         reward = self.compute_reward(tmp_obs["achieved_goal"], tmp_obs["desired_goal"], info)
 

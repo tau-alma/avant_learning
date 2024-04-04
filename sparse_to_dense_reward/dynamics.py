@@ -24,6 +24,7 @@ class AvantDynamics:
         self.dt = dt
         # Define control normalization constants:
         self.control_scalers = torch.tensor([config.avant_max_dot_dot_beta, config.avant_max_a], dtype=torch.float32).to(device)
+        
         # Define state bounds:
         self.lbx = torch.tensor([-torch.inf, -torch.inf, -torch.inf, -config.avant_max_beta, -config.avant_max_dot_beta, config.avant_min_v, -torch.inf, -torch.inf, 0], dtype=torch.float32).to(device)
         self.ubx = torch.tensor([torch.inf, torch.inf, torch.inf, config.avant_max_beta, config.avant_max_dot_beta, config.avant_max_v, torch.inf, torch.inf, 2*torch.pi], dtype=torch.float32).to(device)
@@ -33,8 +34,8 @@ class AvantDynamics:
         ubx_initial = torch.tensor([self.position_bound, self.position_bound, 2*torch.pi, 1e-5, 1e-5, 1e-5], dtype=torch.float32).to(device)
         self.state_sampler = torch.distributions.uniform.Uniform(lbx_initial, ubx_initial)
         # Define goal offset sampling distribution:
-        lbg = torch.tensor([5, 0.0], dtype=torch.float32).to(device)
-        ubg = torch.tensor([15.0, 2*torch.pi], dtype=torch.float32).to(device)
+        lbg = torch.tensor([5, 0.0, 0.0], dtype=torch.float32).to(device)
+        ubg = torch.tensor([15.0, 2*torch.pi, 2*torch.pi], dtype=torch.float32).to(device)
         self.goal_offset_sampler = torch.distributions.uniform.Uniform(lbg, ubg)
 
     def discrete_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
@@ -60,11 +61,12 @@ class AvantDynamics:
         x = self.state_sampler.sample((N,))
         goal_offset = self.goal_offset_sampler.sample((N,))
         goal_dist = goal_offset[:, 0]
-        goal_angle = goal_offset[:, 1]
+        goal_angle1 = goal_offset[:, 1]
+        goal_angle2 = goal_offset[:, 2]
 
         goal = torch.empty((N, 3)).to(x.device)
-        goal[:, 0] = x[:, AvantDynamics.x_f_idx] + goal_dist * torch.cos(goal_angle)
-        goal[:, 1] = x[:, AvantDynamics.y_f_idx] + goal_dist * torch.sin(goal_angle)
-        goal[:, 2] = x[:, AvantDynamics.theta_f_idx] + goal_angle
+        goal[:, 0] = x[:, AvantDynamics.x_f_idx] + goal_dist * torch.cos(goal_angle1)
+        goal[:, 1] = x[:, AvantDynamics.y_f_idx] + goal_dist * torch.sin(goal_angle1)
+        goal[:, 2] = x[:, AvantDynamics.theta_f_idx] + goal_angle2
     
         return torch.hstack([x, goal])
