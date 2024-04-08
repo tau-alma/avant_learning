@@ -86,10 +86,10 @@ def build_ocp(ocp, N, l4c_model=None, linearize_cost_model=False):
 
     # Control constraints:
     ocp.constraints.lbu = np.array([
-        -config.avant_max_dot_dot_beta, -config.max_a
+        -config.avant_max_dot_dot_beta, -config.avant_max_a
     ])
     ocp.constraints.ubu = np.array([
-        config.avant_max_dot_dot_beta, config.max_a,
+        config.avant_max_dot_dot_beta, config.avant_max_a,
     ])
     ocp.constraints.idxbu = np.arange(ocp.model.u.size()[0])
 
@@ -116,8 +116,8 @@ def build_ocp(ocp, N, l4c_model=None, linearize_cost_model=False):
     ocp.cost.cost_type = 'NONLINEAR_LS'
     ocp.cost.yref = np.zeros(4) 
     ocp.cost.W = scipy.linalg.block_diag(
-        1e-2, 1e-3, 
-        1e-2, 1e-3)
+        1e-4, 1e-3, 
+        1e-9, 1e-9)
     ocp.model.cost_y_expr = vertcat(
         a, dot_dot_beta * 180/pi, 
         v, 180/pi * dot_beta

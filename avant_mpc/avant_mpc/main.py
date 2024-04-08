@@ -1,11 +1,11 @@
 import rclpy
-from mpc import AcadosMPC 
+from mpc import AcadosMPC, SymbolicMPC, EvotorchMPC
 
 
 def main(args=None):
     rclpy.init(args=args)
 
-    node = AcadosMPC()    
+    node = EvotorchMPC()    
 
     rclpy.spin(node)
     node.destroy_node()
