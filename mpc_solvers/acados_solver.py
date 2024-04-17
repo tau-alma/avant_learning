@@ -1,6 +1,6 @@
-import torch
-import l4casadi as l4c
 import numpy as np
+import casadi as cs
+import scipy
 from acados_template import AcadosOcp, AcadosOcpSolver
 from mpc_solvers.mpc_problem import SymbolicMPCProblem
 
@@ -26,6 +26,76 @@ class AcadosSolver:
 
     def _create_solver(self, problem: SymbolicMPCProblem):
         self.ocp = AcadosOcp()
+
+        self.ocp.model.name = "acados_ocp"
+        self.ocp.dims.N = problem.N
+        # States
+        self.ocp.model.x = problem.ocp_x
+        # Controls
+        self.ocp.model.u = problem.ocp_u
+        # Parameters
+        self.ocp.model.p = problem.ocp_p
+
+        self.ocp.model.f_expl_expr = problem.dynamics_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
+        x_dot = cs.MX.sym("xdot", problem.ocp_x.size())
+        self.ocp.model.f_impl_expr = x_dot - self.ocp.model.f_expl_expr
+
+        # State constraints:
+        self.ocp.constraints.lbx = problem.lbx_vec
+        self.ocp.constraints.ubx = problem.ubx_vec
+        self.ocp.constraints.lbx_e = problem.lbx_vec
+        self.ocp.constraints.ubx_e = problem.ubx_vec
+        self.ocp.constraints.idxbx = np.arange(problem.ocp_x.size()[0])
+        self.ocp.constraints.idxbx_e = self.ocp.constraints.idxbx
+        # State soft constraints:
+        # ocp.constraints.lsbx = np.zeros(3)
+        # ocp.constraints.usbx = np.zeros(3)
+        # ocp.constraints.lsbx_e = ocp.constraints.lsbx
+        # ocp.constraints.usbx_e = ocp.constraints.usbx
+        # ocp.constraints.idxsbx = np.arange(start=3, stop=6)
+        # ocp.constraints.idxsbx_e = ocp.constraints.idxsbx
+        state_slack_weights = np.array([])
+
+        # Control constraints:
+        self.ocp.constraints.lbu = problem.lbu_vec
+        self.ocp.constraints.ubu = problem.ubu_vec
+        self.ocp.constraints.idxbu = np.arange(problem.ocp_u.size()[0])
+
+        # Nonlinear constraints:
+        if problem.g_fun is not None:
+            self.ocp.model.con_h_expr = problem.g_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
+            self.ocp.constraints.idxsh = np.arange(0)
+            nonlinear_slack_weights = np.array([])
+        if problem.terminal_g_fun is not None:
+            self.ocp.model.con_h_expr_e = problem.terminal_g_fun(problem.ocp_x, problem.ocp_p)
+            self.ocp.constraints.idxsh_e = np.arange(0)
+            nonlinear_slack_weights_e = np.array([])
+
+        # Slack penalties:
+        self.ocp.cost.zl =   np.r_[state_slack_weights, nonlinear_slack_weights]
+        self.ocp.cost.zl_e = np.r_[state_slack_weights, nonlinear_slack_weights_e]
+        self.ocp.cost.zu =   np.r_[state_slack_weights, nonlinear_slack_weights]
+        self.ocp.cost.zu_e = np.r_[state_slack_weights, nonlinear_slack_weights_e]
+        self.ocp.cost.Zl =   np.r_[state_slack_weights, nonlinear_slack_weights]
+        self.ocp.cost.Zl_e = np.r_[state_slack_weights, nonlinear_slack_weights_e]
+        self.ocp.cost.Zu =   np.r_[state_slack_weights, nonlinear_slack_weights]
+        self.ocp.cost.Zu_e = np.r_[state_slack_weights, nonlinear_slack_weights_e]
+
+        # Stage cost:
+        self.ocp.cost.cost_type = 'NONLINEAR_LS'
+        self.ocp.model.cost_y_expr = problem.cost_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
+        self.ocp.cost.yref = np.zeros(self.ocp.model.cost_y_expr.size1()) 
+        self.ocp.cost.W = scipy.linalg.block_diag(np.ones(self.ocp.model.cost_y_expr.size1()))
+
+        # Terminal cost
+        if problem._l4c_model is not None:
+            self.ocp.cost.cost_type_e = 'EXTERNAL'
+            neural_cost_state = problem.ocp_x_to_terminal_state_fun()
+        else:
+            self.ocp.cost.cost_type = 'NONLINEAR_LS'
+            self.ocp.model.cost_y_expr_e = problem.cost_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
+            self.ocp.cost.yref_e = np.zeros(self.ocp.model.cost_y_expr.size1()) 
+            self.ocp.cost.W_e = scipy.linalg.block_diag(np.ones(self.ocp.model.cost_y_expr.size1()))
         
         # Initialize initial conditions:
         self.n_states = self.ocp.model.x.size()[0]
