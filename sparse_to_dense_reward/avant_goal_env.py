@@ -1,14 +1,17 @@
+import time
 import torch
 import gymnasium
 import numpy as np
 import pygame
 import numpy as np
+from multiprocessing import Pool
 from abc import ABC, abstractmethod
 from typing import List, Tuple
 from gymnasium import spaces
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvStepReturn
 from sparse_to_dense_reward.avant_dynamics import AvantDynamics
-from sparse_to_dense_reward.utils import rotate_image, create_occupancy_grids
+from sparse_to_dense_reward.utils import rotate_image, create_occupancy_grids, GoalEnv, precompute_lidar_direction_vectors, simulate_lidar
+from rtree import index
 
 POSITION_BOUND = 5
 OBSTACLE_MIN_RADIUS = 0.5
@@ -29,49 +32,11 @@ HALF_MACHINE_WIDTH = 0.6
 HALF_MACHINE_LENGTH = 1.3
 MACHINE_RADIUS = 0.8
 
-class GoalEnv(ABC):
-    """
-    Interface for A goal-based environment.
-
-    This interface is needed by agents such as Stable Baseline3's Hindsight Experience Replay (HER) agent.
-    It was originally part of https://github.com/openai/gym, but was later moved
-    to https://github.com/Farama-Foundation/gym-robotics. We cannot add gym-robotics to this project's dependencies,
-    since it does not have an official PyPi package, PyPi does not allow direct dependencies to git repositories.
-    So instead, we just reproduce the interface here.
-
-    A goal-based environment. It functions just as any regular OpenAI Gym environment but it
-    imposes a required structure on the observation_space. More concretely, the observation
-    space is required to contain at least three elements, namely `observation`, `desired_goal`, and
-    `achieved_goal`. Here, `desired_goal` specifies the goal that the agent should attempt to achieve.
-    `achieved_goal` is the goal that it currently achieved instead. `observation` contains the
-    actual observations of the environment as per usual.
-    """
-
-    @abstractmethod
-    def compute_reward(
-        self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: dict
-    ) -> float:
-        """Compute the step reward. This externalizes the reward function and makes
-        it dependent on a desired goal and the one that was achieved. If you wish to include
-        additional rewards that are independent of the goal, you can include the necessary values
-        to derive it in 'info' and compute it accordingly.
-        Args:
-            achieved_goal (object): the goal that was achieved during execution
-            desired_goal (object): the desired goal that we asked the agent to attempt to achieve
-            info (dict): an info dictionary with additional information
-        Returns:
-            float: The reward that corresponds to the provided achieved goal w.r.t. to the desired
-            goal. Note that the following should always hold true:
-                ob, reward, done, info = env.step()
-                assert reward == env.compute_reward(ob['achieved_goal'], ob['desired_goal'], info)
-        """
-        raise NotImplementedError
-
 
 class AvantGoalEnv(VecEnv, GoalEnv):
     RENDER_RESOLUTION = 1280
 
-    def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, num_obstacles: int = 0):
+    def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, num_obstacles: int = 0, num_processes: int = 1):
         self.num_envs = num_envs
         self.time_limit_s = time_limit_s
         self.device = device
@@ -146,6 +111,12 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         pallet_image = pygame.image.load('sparse_to_dense_reward/pallet.png')
         self.pallet_image = pygame.transform.scale(pallet_image, (pallet_scale_factor*pallet_image.get_width(), pallet_scale_factor*pallet_image.get_height()))
 
+        # For 2D lidar "simulation" using R-trees:
+        self.num_processes = num_processes
+        self.r_tree_indices = [None for _ in range(num_envs)]
+        self.lidar_angles, self.lidar_direction_vectors = precompute_lidar_direction_vectors(num_rays=180, max_distance=5)
+        self.lidar_points = torch.empty([num_envs, len(self.lidar_angles), 2]).to(device)
+
         # For "fake" vectorization (done within the env already)
         self.returns = None
 
@@ -202,6 +173,17 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         )
 
         return reward - penalty
+    
+    def _simulate_lidar(self):
+        origins = self.states[:, :2].cpu().numpy()
+        results = []
+        for env_i in range(self.num_envs):
+            result = simulate_lidar(origins[env_i], self.r_tree_indices[env_i], self.lidar_angles, self.lidar_direction_vectors) 
+            results.append(result)
+        results = np.asarray(results)
+
+        lidar_points = torch.as_tensor(results, dtype=torch.float32).to(self.states.device)
+        self.lidar_points = lidar_points
 
     def step(self, actions):
         assert actions.dtype==np.float32
@@ -230,12 +212,23 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             # Reset done envs:
             self._internal_reset(done_indices)
 
+        self._simulate_lidar()
         obs = self._construct_observation(self.states)
 
         return obs, reward, done.cpu().numpy(), info
+    
+    def _setup_lidar_r_trees(self, indices: torch.Tensor):
+        obstacles = self.obstacles.cpu().numpy()
+        for env_i in indices:
+            r_idx = index.Index()
+            for i, (x, y, r) in enumerate(obstacles[env_i]):
+                # R-tree needs bounding boxes, which for circles are given by (x-r, y-r, x+r, y+r)
+                r_idx.insert(i, (x-r, y-r, x+r, y+r), obj=(x, y, r))
+            self.r_tree_indices[env_i] = r_idx
 
     def _internal_reset(self, indices: torch.Tensor):
         N_SAMPLES = self.num_envs*10000
+        indices_copy = indices.clone()
 
         # Ensure we have valid initial pose, goal pose and obstacle location(s), if not, resample:
         envs_left = len(indices)
@@ -299,6 +292,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             envs_left -= n_valid
             indices = indices[n_valid:]
 
+        self._setup_lidar_r_trees(indices_copy)
         
     def reset(self, initial_pose: List[np.ndarray]=None, goal_pose: List[np.ndarray]=None):
         if initial_pose is not None and goal_pose is not None:
@@ -327,6 +321,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         x_goal = self.states[indices, self.dynamics.x_goal_idx].cpu().numpy()
         y_goal = self.states[indices, self.dynamics.y_goal_idx].cpu().numpy()
         theta_goal = self.states[indices, self.dynamics.theta_goal_idx].cpu().numpy()
+
+        lidar_points = self.lidar_points[indices].cpu().numpy()
 
         center = self.RENDER_RESOLUTION // 2
         pos_to_pixel_scaler = self.RENDER_RESOLUTION / (4*POSITION_BOUND)
@@ -372,7 +368,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                                center=(center + x_off, center + y_off),
                                radius=pos_to_pixel_scaler*MACHINE_RADIUS)
             
-            # Black magic to shift the image correctly given the goal to pallet offset:
+            # Black magic to shift the pallet image correctly given the goal to pallet offset:
             x_off = pos_to_pixel_scaler*(
                 x_goal[i] + np.cos(theta_goal[i]) * (PALLET_OFFSET + PALLET_LENGTH/2)
             )
@@ -387,7 +383,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                            (center + x_off - final_position[0], 
                             center + y_off - final_position[1]))
 
-            # Black magic to shift the image correctly given the kinematics:
+            # Black magic to shift the avant frame images correctly given the kinematics:
             x_off = pos_to_pixel_scaler*(
                 x_goal[i] - np.cos(theta_goal[i]) * HALF_MACHINE_LENGTH/2
             )
@@ -398,7 +394,6 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             surf.blit(rotated_image, 
                            (center + x_off - final_position[0], 
                             center + y_off - final_position[1]))
-            
             rotated_image, final_position = rotate_image(self.front_gray_image, np.rad2deg(theta_goal[i] + np.pi/2), self.front_center_offset.tolist())
             surf.blit(rotated_image, 
                            (center + x_off - final_position[0], 
@@ -406,21 +401,25 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             pygame.draw.circle(surf, RED, 
                                center=(center + pos_to_pixel_scaler*(x_goal[i]), center + pos_to_pixel_scaler*(y_goal[i])),
                                radius=5)
-    
+            
+            # Draw the lidar returns:
+            for x, y in lidar_points[i]:
+                pygame.draw.circle(surf, RED, 
+                                center=(center + pos_to_pixel_scaler*x, center + pos_to_pixel_scaler*y),
+                                radius=3)
 
+            # During evaluation, draw the prediction horizon, if provided:
             if len(horizon):
                 data = np.r_[np.c_[x_f[i], y_f[i], theta_f[i], betas[i]],
                              horizon]
             else:
                 data = np.c_[x_f[i], y_f[i], theta_f[i], betas[i]]
-
             for j in range(len(data)):
                 x_f_val, y_f_val, theta_f_val, beta_val = data[j]
                 if j == 0:
                     draw_surf = surf
                 else:
                     draw_surf = alpha_surf
-                
                 # Black magic to shift the image correctly given the kinematics:
                 x_off = pos_to_pixel_scaler*(
                     x_f_val - np.cos(theta_f_val) * np.cos(beta_val/4)*HALF_MACHINE_LENGTH/2 
@@ -430,17 +429,14 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                     y_f_val - np.sin(theta_f_val) * np.cos(beta_val/4)*HALF_MACHINE_LENGTH/2 
                     + np.cos(theta_f_val) * np.sin(beta_val/4)*HALF_MACHINE_LENGTH/2 
                 )
-                
                 rotated_image, final_position = rotate_image(self.rear_image, np.rad2deg(theta_f_val + beta_val + np.pi/2), self.rear_center_offset.tolist())
                 draw_surf.blit(rotated_image, 
                             (center + x_off - final_position[0], 
                                 center + y_off - final_position[1]))
-                
                 rotated_image, final_position = rotate_image(self.front_image, np.rad2deg(theta_f_val + np.pi/2), self.front_center_offset.tolist())
                 draw_surf.blit(rotated_image, 
                             (center + x_off - final_position[0], 
                                 center + y_off - final_position[1]))
-            
                 pygame.draw.circle(draw_surf, RED,
                                    center=(center + pos_to_pixel_scaler*(x_f_val), center + pos_to_pixel_scaler*(y_f_val)),
                                    radius=5)
