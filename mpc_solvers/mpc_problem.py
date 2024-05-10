@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Callable
 from abc import ABC, abstractmethod
 
+
 class SymbolicMPCSolver(ABC):
     @abstractmethod
     def solve():

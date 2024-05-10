@@ -101,7 +101,7 @@ class AcadosSolver:
         self.ocp.cost.cost_type = 'NONLINEAR_LS'
         self.ocp.model.cost_y_expr = problem.cost_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
         self.ocp.cost.yref = np.zeros(self.ocp.model.cost_y_expr.size1()) 
-        self.ocp.cost.W = scipy.linalg.block_diag(np.ones(self.ocp.model.cost_y_expr.size1()))
+        self.ocp.cost.W = scipy.linalg.block_diag(*[0] * self.ocp.model.cost_y_expr.size1())
 
         # Terminal cost
         if problem.terminal_cost_fun is not None:
@@ -113,10 +113,10 @@ class AcadosSolver:
                 else:
                     self.ocp.model.cost_expr_ext_cost_e = problem.terminal_cost_fun(neural_cost_state, problem.terminal_ocp_p)
             else:
-                self.ocp.cost.cost_type = 'NONLINEAR_LS'
-                self.ocp.model.cost_y_expr_e = problem.cost_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
-                self.ocp.cost.yref_e = np.zeros(self.ocp.model.cost_y_expr.size1()) 
-                self.ocp.cost.W_e = scipy.linalg.block_diag(np.ones(self.ocp.model.cost_y_expr.size1()))
+                self.ocp.cost.cost_type_e = 'NONLINEAR_LS'
+                self.ocp.model.cost_y_expr_e = problem.terminal_cost_fun(problem.ocp_x, problem.ocp_p)
+                self.ocp.cost.yref_e = np.zeros(self.ocp.model.cost_y_expr_e.size1()) 
+                self.ocp.cost.W_e = scipy.linalg.block_diag(*[0] * self.ocp.model.cost_y_expr_e.size1())
         
         # Initialize initial conditions:
         self.n_states = self.ocp.model.x.size()[0]

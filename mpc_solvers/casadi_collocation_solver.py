@@ -6,7 +6,7 @@ from mpc_solvers.mpc_problem import SymbolicMPCProblem
 
 
 class CasadiCollocationSolver:
-    def __init__(self, problem: SymbolicMPCProblem):
+    def __init__(self, problem: SymbolicMPCProblem, rebuild: bool=True):
         self.problem = problem
         self.N = problem.N
         self.has_terminal_cost = problem.terminal_cost_fun is not None
@@ -174,13 +174,14 @@ class CasadiCollocationSolver:
         solver = nlpsol('solver', 'ipopt', prob, opts)
         
         # Generate C code:
-        gen_opts = {}
-        solver.generate_dependencies("nlp.c", gen_opts)
-        if problem.model_external_shared_lib_name is not None and problem.model_external_shared_lib_name is not None:
-            # Need to link the l4casadi symbols:
-            subprocess.Popen(f"gcc -fPIC -shared -O3 nlp.c -o nlp.so -L {problem.model_external_shared_lib_dir} -l {problem.model_external_shared_lib_name}", shell=True).wait()
-        else:
-            subprocess.Popen("gcc -fPIC -shared -O3 nlp.c -o nlp.so", shell=True).wait()
+        if rebuild:
+            gen_opts = {}
+            solver.generate_dependencies("nlp.c", gen_opts)
+            if problem.model_external_shared_lib_name is not None and problem.model_external_shared_lib_name is not None:
+                # Need to link the l4casadi symbols:
+                subprocess.Popen(f"gcc -fPIC -shared -O2 nlp.c -o nlp.so -L {problem.model_external_shared_lib_dir} -l {problem.model_external_shared_lib_name}", shell=True).wait()
+            else:
+                subprocess.Popen("gcc -fPIC -shared -O2 nlp.c -o nlp.so", shell=True).wait()
         self.solver = nlpsol("solver", "ipopt", "./nlp.so", opts)
 
         # Function to get x and u trajectories from w
