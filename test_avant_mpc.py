@@ -12,18 +12,8 @@ from mpc_solvers.casadi_shooting_solver import CasadiShootingSolver
 from mpc_solvers.acados_solver import AcadosSolver
 
 
-class TestModel(torch.nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x):
-        if len(x.shape) == 1:
-            x = x.unsqueeze(0)
-        return -((x[:, 0] - x[:, 4])**2 + (x[:, 1] - x[:, 5])**2).unsqueeze(1)
-    
-    
 class MPCActor:
-    def __init__(self, solver_class, linearize=True):
+    def __init__(self, solver_class, linearize=False):
         self.history = []
         super().__init__()
 
@@ -62,12 +52,16 @@ class MPCActor:
         x_goal = cs.MX.sym("x_goal")
         y_goal = cs.MX.sym("y_goal")
         theta_goal = cs.MX.sym("y_goal")
-        ocp_p = cs.vertcat()
+        t = cs.MX.sym("t")
+        # ocp_p = cs.vertcat(x_goal, y_goal, theta_goal, t)
+        ocp_p = cs.vertcat(t)
         terminal_ocp_p = cs.vertcat(x_goal, y_goal, theta_goal)
 
         # Continuous dynamics:
         alpha = cs.pi + beta
         omega_f = v * config.avant_lf / cs.tan(alpha/2)
+        dot_beta_omega_f = 0.5 * dot_beta
+        omega_f -= dot_beta_omega_f
         f_expr = cs.vertcat(
             v * cs.cos(theta_f),
             v * cs.sin(theta_f),
@@ -79,12 +73,17 @@ class MPCActor:
         f = cs.Function('f', [ocp_x, ocp_u, ocp_p], [f_expr])
 
         # Stage cost:
-        l = cs.Function('l', [ocp_x, ocp_u, ocp_p], [0])       
-        # l_t = cs.Function('l_t', [ocp_x, terminal_ocp_p], [(x_goal - x_f)**2 + (y_goal - y_f)**2])
+        l = cs.Function('l', [ocp_x, ocp_u, ocp_p], [0])  
+
+        # For empirical cost experiments:
+        goal_heading = (90 * (1 - cs.cos(theta_goal - theta_f)) )**2
+        goal_scaled_dist = (1e1*(x_f - x_goal))**2 + (1e1*(y_f - y_goal))**2
+        # l  = cs.Function('l', [ocp_x, ocp_u, ocp_p], [t*(dot_dot_beta**2 + a**2 + v**2)])           
+        # l_t = cs.Function('l_t', [ocp_x, terminal_ocp_p], [goal_scaled_dist + goal_heading])
 
         problem = SymbolicMPCProblem(
-            N=3,
-            h=0.1,
+            N=1,
+            h=0.2,
             ocp_x=ocp_x,
             lbx_vec=lbx_vec,
             ubx_vec=ubx_vec,
@@ -96,7 +95,7 @@ class MPCActor:
             terminal_ocp_p=terminal_ocp_p,
             dynamics_fun=f, 
             cost_fun=l,
-            # terminal_cost_fun=l_t
+            #terminal_cost_fun=l_t
         )
  
         # Terminal cost with Q network:
@@ -106,10 +105,9 @@ class MPCActor:
                                        beta, dot_beta, v, 
                                        0, 0)
         model = torch.load("avant_critic").eval()
-        # model = TestModel()
         problem.add_terminal_neural_cost(model=model, model_state=neural_cost_state, linearize=linearize)
 
-        self.solver = solver_class(problem)
+        self.solver = solver_class(problem, rebuild=True)
 
     def act(self, observation) -> np.ndarray:
         obs = observation["observation"][0]
@@ -120,6 +118,7 @@ class MPCActor:
         desired_goal = observation["desired_goal"][0]
         desired_goal = np.r_[desired_goal[:2], np.arctan2(desired_goal[2], desired_goal[3])]
         params = [np.empty(0) for _ in range(self.solver.N + 1)]
+        params = [np.r_[j*0.2/(self.solver.N*0.2)] for j in range(self.solver.N + 1)]
         params[-1] = desired_goal
         
         t1 = time.time_ns()
@@ -146,7 +145,7 @@ if __name__ == "__main__":
         raise ValueError(f"Unknown solver {args.solver}")
     
     # Initialize environment and actor
-    env = AvantGoalEnv(num_envs=1, dt=0.1, time_limit_s=30, device='cpu')
+    env = AvantGoalEnv(num_envs=1, dt=0.1, time_limit_s=30, device='cpu', num_obstacles=5)
     actor = MPCActor(solver_class=solver_class, linearize=args.linearize)
 
     screen = pygame.display.set_mode([env.RENDER_RESOLUTION, env.RENDER_RESOLUTION])
@@ -155,11 +154,14 @@ if __name__ == "__main__":
     frame_rate = 30
     normal_frame_duration_ms = 1000 // frame_rate
     # Adjust frame duration for 0.25x real-time speed
-    slow_motion_multiplier = 4  # Slow down by this factor
+    slow_motion_multiplier = 2  # Slow down by this factor
     frame_duration_ms = normal_frame_duration_ms * slow_motion_multiplier
 
     # Main simulation loop
-    obs = env.reset()
+    initial_pose = [np.array([-0.5, -0.5, -np.pi/2], dtype=np.float32)]
+    goal_pose = [np.array([3.3, 3.3, 0], dtype=np.float32)]
+    obs = env.reset()#initial_pose, goal_pose)
+
     while True:
         for _ in pygame.event.get():
             pass
@@ -167,7 +169,9 @@ if __name__ == "__main__":
 
         action, horizon = actor.act(obs)
         action /= env.dynamics.control_scalers.cpu().numpy()
+        
         obs, reward, done, _ = env.step(action.reshape(1, -1).astype(np.float32))
+
         frame = env.render(mode='rgb_array', horizon=horizon)
         pygame.surfarray.blit_array(screen, frame.transpose(1, 0, 2))
         pygame.display.flip()
