@@ -8,11 +8,11 @@ from typing import List, Tuple
 from gymnasium import spaces
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvStepReturn
 from sparse_to_dense_reward.avant_dynamics import AvantDynamics
-from sparse_to_dense_reward.utils import rotate_image
+from sparse_to_dense_reward.utils import rotate_image, create_occupancy_grids
 
 POSITION_BOUND = 5
-OBSTACLE_MIN_RADIUS = 1
-OBSTACLE_MAX_RADIUS = 2
+OBSTACLE_MIN_RADIUS = 0.5
+OBSTACLE_MAX_RADIUS = 1.5
 
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
@@ -170,13 +170,15 @@ class AvantGoalEnv(VecEnv, GoalEnv):
 
         return np.vstack([x_f, y_f, s_theta_f, c_theta_f]).T, np.vstack([x_goal, y_goal, s_theta_goal, c_theta_goal]).T
 
-    def _construct_observation(self, states: torch.Tensor):
+    def _construct_observation(self, states: torch.Tensor, tmp: bool=False):
         achieved_goals, desired_goals = self._compute_goals(states)
         obs = {
             "achieved_goal": achieved_goals,
             "desired_goal": desired_goals,
-            "observation": self._observe(states),
+            "observation": self._observe(states)
         }
+        if not tmp:
+            obs["occupancy_grid"] = create_occupancy_grids(self.obstacles, cell_size=0.0925, axis_limit=2*POSITION_BOUND)
         return obs
 
     def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict], p=0.5) -> float:
@@ -208,7 +210,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.num_steps += 1
 
         info = [{} for i in range(self.num_envs)]
-        tmp_obs = self._construct_observation(self.states)
+        tmp_obs = self._construct_observation(self.states, tmp=True)
         reward = self.compute_reward(tmp_obs["achieved_goal"], tmp_obs["desired_goal"], info)
 
         terminated = torch.from_numpy(reward > self.reward_target).to(self.states.device)
@@ -233,66 +235,71 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         return obs, reward, done.cpu().numpy(), info
 
     def _internal_reset(self, indices: torch.Tensor):
-        samples = self.initial_pose_distribution.sample((len(indices),))
-        initial_poses = samples[:, :3]
-        goal_poses = samples[:, 3:6]
+        N_SAMPLES = self.num_envs*10000
 
-        while True:
-            # Ensure we have a valid goal location, if not, resample:
-            i_g_dist = torch.norm(goal_poses[:, :2] - initial_poses[:, :2], dim=1)
-            invalid_indices = torch.argwhere(i_g_dist < 3)
-            if len(invalid_indices) == 0:
-                break
-            samples[invalid_indices] = self.initial_pose_distribution.sample((len(invalid_indices),))
+        # Ensure we have valid initial pose, goal pose and obstacle location(s), if not, resample:
+        envs_left = len(indices)
+        while True:        
+            pose_samples = self.initial_pose_distribution.sample((N_SAMPLES,))
+            obstacles = self.obstacle_position_distribution.sample((N_SAMPLES,)).view(N_SAMPLES, self.num_obstacles, 3)
+
+            # Initial pose should be far enough away from goal pose:
+            i_g_dist = torch.norm(pose_samples[:, :2] - pose_samples[:, 3:5], dim=1)
         
-        self.states[indices, :3] = samples[:, :3]
-        self.states[indices, 3:6] = torch.zeros((len(indices), 3)).to(self.states.device)
-        self.states[indices, 6:9] = samples[:, 3:6]
-        self.num_steps[indices] = 0
-
-        obstacles = self.obstacle_position_distribution.sample((len(indices),)).view(len(indices), self.num_obstacles, 3)
-        while True:
-            # Ensure we have valid obstacle location(s), if not, resample:
-            i_f_o_diff = obstacles[:, :, :2] - initial_poses[:, :2].unsqueeze(1).expand(-1, self.num_obstacles, -1)
-            i_f_o_dist = torch.norm(i_f_o_diff, dim=2) - (obstacles[:, :, 2] + MACHINE_RADIUS)
+            # Initial pose should be far enough away from any obstacle:
+            machine_center_points = pose_samples[:, :2].clone()
+            machine_center_points[:, 0] -= torch.cos(pose_samples[:, 2]) * HALF_MACHINE_LENGTH
+            machine_center_points[:, 1] -= torch.sin(pose_samples[:, 2]) * HALF_MACHINE_LENGTH
+            i_f_o_diff = obstacles[:, :, :2] - machine_center_points.unsqueeze(1).expand(-1, self.num_obstacles, -1)
+            i_f_o_dist = torch.norm(i_f_o_diff, dim=2) - (obstacles[:, :, 2] + HALF_MACHINE_LENGTH)
             min_i_f_o_dist = torch.amin(i_f_o_dist, dim=[1])
 
-            g_o_diff = obstacles[:, :, :2] - goal_poses[:, :2].unsqueeze(1).expand(-1, self.num_obstacles, -1)
-            g_o_dist = torch.norm(g_o_diff, dim=2) - (obstacles[:, :, 2] + PALET_RADIUS)
+            # Goal pose should be far enough away from any obstacle:
+            goal_center_points = pose_samples[:, 3:5]
+            g_o_diff = obstacles[:, :, :2] - goal_center_points.unsqueeze(1).expand(-1, self.num_obstacles, -1)
+            g_o_dist = torch.norm(g_o_diff, dim=2) - (obstacles[:, :, 2] + 2*HALF_MACHINE_LENGTH)
             min_g_o_dist = torch.amin(g_o_dist, dim=[1])
 
-            # Expand obstacle coordinates for pairwise broadcasting
-            a_expanded_row = obstacles[:, :, :2].unsqueeze(2).expand(len(indices), self.num_obstacles, self.num_obstacles, 2)
-            a_expanded_col = obstacles[:, :, :2].unsqueeze(1).expand(len(indices), self.num_obstacles, self.num_obstacles, 2)
-            # Compute the difference between every pair of points
+            # The distance between each obstacle should be big enough to drive through:
+            a_expanded_row = obstacles[:, :, :2].unsqueeze(2).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles, 2)
+            a_expanded_col = obstacles[:, :, :2].unsqueeze(1).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles, 2)
             diff = a_expanded_row - a_expanded_col
-            # Calculate Euclidean distances (center to center)
-            pairwise_distances = torch.norm(diff, p=2, dim=3)
-            # Expand radii for pairwise operations
-            radii_expanded_row = obstacles[:, :, 2].unsqueeze(2).expand(len(indices), self.num_obstacles, self.num_obstacles)
-            radii_expanded_col = obstacles[:, :, 2].unsqueeze(1).expand(len(indices), self.num_obstacles, self.num_obstacles)
-            # Calculate sum of radii for each pair
-            sum_radii = radii_expanded_row + radii_expanded_col
-            # Compute edge-to-edge distances by subtracting radii from center-to-center distances
-            edge_to_edge_distances = pairwise_distances - sum_radii
+            radii_expanded_row = obstacles[:, :, 2].unsqueeze(2).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles)
+            radii_expanded_col = obstacles[:, :, 2].unsqueeze(1).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles)
+            edge_to_edge_distances = torch.norm(diff, p=2, dim=3) - (radii_expanded_row + radii_expanded_col)
             # Set diagonal elements to infinity to ignore self-distance
             torch.diagonal(edge_to_edge_distances, dim1=-2, dim2=-1).fill_(float('inf'))
-            # Find the minimum edge-to-edge distance for each environment across all obstacle pairs
             min_edge_to_edge_distance = torch.amin(edge_to_edge_distances, dim=[1, 2])
 
-            invalid_indices = torch.argwhere(
-                (min_i_f_o_dist < 3*HALF_MACHINE_WIDTH) |
-                (min_g_o_dist < 3*HALF_MACHINE_WIDTH) | 
-                (min_edge_to_edge_distance < 3*HALF_MACHINE_WIDTH)
+            valid_indices = torch.argwhere(
+                (i_g_dist > 7.5) &
+                (min_i_f_o_dist > 2.5*HALF_MACHINE_WIDTH) &
+                (min_g_o_dist > 2.5*HALF_MACHINE_WIDTH) & 
+                (min_edge_to_edge_distance > 2.5*HALF_MACHINE_WIDTH)
             ).flatten()
-            if len(invalid_indices) == 0:
+
+            # Apply all the valid env samples:
+            n_valid = min(envs_left, len(valid_indices))
+
+            if n_valid == 0:
+                continue
+
+            updated_env_indices = indices[:n_valid]
+            np_valid_indices = valid_indices.cpu().numpy()[:n_valid]
+
+            self.states[updated_env_indices, :3] = pose_samples[np_valid_indices, :3]
+            self.states[updated_env_indices, 3:6] = torch.zeros((n_valid, 3)).to(self.states.device)
+            self.states[updated_env_indices, 6:9] = pose_samples[np_valid_indices, 3:6]
+            self.num_steps[updated_env_indices] = 0
+            self.obstacles[updated_env_indices] = obstacles[np_valid_indices]
+
+            if len(valid_indices) >= envs_left:
                 break
 
-            resamples = self.obstacle_position_distribution.sample((len(invalid_indices),))
-            obstacles[invalid_indices] = resamples.view(len(invalid_indices), self.num_obstacles, 3)
+            envs_left -= n_valid
+            indices = indices[n_valid:]
 
-        self.obstacles = obstacles
-
+        
     def reset(self, initial_pose: List[np.ndarray]=None, goal_pose: List[np.ndarray]=None):
         if initial_pose is not None and goal_pose is not None:
             if len(initial_pose) == self.num_envs and len(goal_pose) == self.num_envs:
@@ -442,8 +449,9 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                 (surf, (0, 0)),
                 (alpha_surf, (0, 0))
             ])
-            buffer = pygame.surfarray.array3d(self.screen)
-            buffer = np.transpose(buffer, (1, 0, 2))
+            buffer = pygame.transform.flip(self.screen, True, False)
+            buffer = pygame.surfarray.array3d(buffer)
+            #buffer = np.transpose(buffer, (1, 0, 2))
             frames[i] = buffer
         return np.concatenate(frames, axis=1)
     
