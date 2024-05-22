@@ -110,7 +110,7 @@ class MPCActor:
         self.solver = solver_class(problem, rebuild=True)
 
     def act(self, observation) -> np.ndarray:
-        obs = observation["observation"][0]
+        obs = observation["observation"][0][:3]
         achieved_goal = observation["achieved_goal"][0]
         achieved_goal = np.r_[achieved_goal[:2], np.arctan2(achieved_goal[2], achieved_goal[3])]
         obs = np.r_[achieved_goal, obs]
