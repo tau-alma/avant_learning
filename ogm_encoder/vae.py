@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from blocks import ConvLayer, ResBlock, ConvLayerTranspose
+from ogm_encoder.blocks import ConvLayer, ResBlock, ConvLayerTranspose
 
 class BaseVAE(nn.Module):
     def __init__(self):
@@ -32,38 +32,39 @@ class VAE(BaseVAE):
         self.encoder = nn.Sequential(
             ConvLayer(1, 32, stride=2),
             ConvLayer(32, 64, stride=2),
-            ResBlock(64),
-            ConvLayer(64, 128, stride=2),
             nn.MaxPool2d(2),
-            ResBlock(128),
-            ConvLayer(128, 128, stride=2),
+            ConvLayer(64, 96, stride=2),
+            nn.MaxPool2d(2),
+            ConvLayer(96, 128, stride=2),
         )
 
         dummy = torch.zeros((1, 1, input_shape, input_shape))
         dummy_output = self.encoder(dummy)        
         final_shape = dummy_output[0].shape
         print(final_shape)
-        # flattened = F.adaptive_max_pool2d(dummy_output, 1) # dummy_output.flatten(start_dim=1)
-        flattened = dummy_output.flatten(start_dim=1)
+        flattened = F.adaptive_max_pool2d(dummy_output, 1)
+        # flattened = dummy_output.flatten(start_dim=1)
         flattened_shape = flattened.shape[1]
         print(flattened_shape)
 
-        # self.encoder.add_module("global_pool", nn.AdaptiveMaxPool2d(1))
+        self.encoder.add_module("global_pool", nn.AdaptiveMaxPool2d(1))
         self.encoder.add_module("flatten", nn.Flatten())
         self.encoder.add_module("dense", nn.Linear(flattened_shape, 2*latent_shape))
 
-        initial_shape = (64, 8, 8)
+        initial_shape = (16, 8, 8)
 
         # Decoder
         self.decoder = nn.Sequential(
-            nn.Linear(latent_shape, 64*8*8),
+            nn.Linear(latent_shape, 16*8*8),
             nn.Unflatten(1, initial_shape),
 
-            ConvLayerTranspose(64, 32, kernel_size=3, stride=3),
-            ConvLayerTranspose(32, 16, kernel_size=3, stride=3),
+            ConvLayerTranspose(16, 32, kernel_size=3, stride=2, padding=1),
+            ConvLayerTranspose(32, 64, kernel_size=3, stride=2, padding=1),
+            ConvLayerTranspose(64, 32, kernel_size=5, stride=4, padding=1),
+            ConvLayerTranspose(32, 16, kernel_size=5, stride=4, padding=1),
 
             # Terminal head:
-            nn.ConvTranspose2d(16, 3, kernel_size=3, stride=3),
+            nn.Conv2d(16, 3, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(3),
             nn.Softmax(dim=1)
         )
@@ -81,7 +82,7 @@ class VAE(BaseVAE):
         return self.decoder(z)
 
 if __name__ == "__main__":
-    vae = VAE(200, 256)
+    vae = VAE(216, 256)
 
     from dataset import OccupancyGridDataset
     dataset = OccupancyGridDataset("/home/aleksi/ogm_images/")

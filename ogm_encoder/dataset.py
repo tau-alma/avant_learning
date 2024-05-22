@@ -14,11 +14,10 @@ class OccupancyGridDataset(Dataset):
         self.folder_path = folder_path
         self.image_files = [f for f in os.listdir(folder_path) if f.endswith('.png')]
 
-        self.image_size = self[0][0].shape[1]
         self.transform = Compose([
             ToTensor()  # Automatically scales to [0, 1] by dividing by 255
         ])
-
+        self.image_size = self[0][0].shape[1]
 
     def __len__(self):
         return len(self.image_files)

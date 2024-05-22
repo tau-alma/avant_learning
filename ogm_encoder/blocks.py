@@ -23,10 +23,10 @@ class ResBlock(nn.Module):
         return x + self.branch(x)
     
 class ConvLayerTranspose(nn.Module):
-    def __init__(self, n_in, n_out, kernel_size=3, stride=2, padding=0):
+    def __init__(self, n_in, n_out, kernel_size=3, stride=2, padding=1, out_padding=1):
         super(ConvLayerTranspose, self).__init__()
         self.seq = nn.Sequential(
-            nn.ConvTranspose2d(n_in, n_out, kernel_size, stride, padding),
+            nn.ConvTranspose2d(n_in, n_out, kernel_size, stride, padding, out_padding),
             nn.BatchNorm2d(n_out),
             nn.Mish()
         )
