@@ -36,19 +36,36 @@ MACHINE_RADIUS = 0.8
 class AvantGoalEnv(VecEnv, GoalEnv):
     RENDER_RESOLUTION = 1280
 
-    def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, num_obstacles: int = 0, num_processes: int = 1):
+    def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, num_obstacles: int = 0, num_processes: int = 1, encoder: torch.nn.Module = None):
         self.num_envs = num_envs
         self.time_limit_s = time_limit_s
         self.device = device
+        self.num_obstacles = num_obstacles
+        self.encoder = encoder
         self.dynamics = AvantDynamics(dt=dt, device=device)
-        
+
         n_actions = len(self.dynamics.control_scalers.cpu().numpy())
         self.single_action_space = spaces.Box(
             low=-np.ones(n_actions),
             high=np.ones(n_actions), 
             dtype=np.float32)
-        l_achieved, l_desired = self._compute_goals(self.dynamics.lbx.unsqueeze(0))
-        u_achieved, u_desired = self._compute_goals(self.dynamics.ubx.unsqueeze(0))
+        l_achieved, l_desired = self._compute_goals(self.dynamics.lbx.unsqueeze(0), torch.zeros((1, num_obstacles, 3)))
+        u_achieved, u_desired = self._compute_goals(self.dynamics.ubx.unsqueeze(0), torch.zeros((1, num_obstacles, 3)))
+
+        # TODO: avoid hardcoding the shape...
+        if encoder is not None:
+            ogm_space = spaces.Box(
+                low=-np.inf * np.ones(64),
+                high=np.inf * np.ones(64),
+                dtype=np.float32
+            )
+        else:
+            ogm_space = spaces.Box(
+                low=np.zeros((1, 256, 256)),
+                high=np.ones((1, 256, 256)),
+                dtype=np.float32
+            )
+            
         self.single_observation_space = spaces.Dict(
             dict(
                 observation=spaces.Box(
@@ -65,14 +82,17 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                     low=l_desired.flatten(),
                     high=u_desired.flatten(),
                     dtype=np.float32
-                )
+                ),
+                occupancy_grid = ogm_space
             )
         )
         
         self.states = torch.empty([num_envs, len(self.dynamics.lbx)]).to(device)
         self.num_steps = torch.zeros(num_envs).to(device)
-        self.reward_weights = np.array([1, 1, 2, 2])
-        self.reward_target = -5e-1
+        # weights for: [x, y, sin_theta, cos_theta, sin_beta, cos_beta]
+        self.reward_weights = np.array([1, 1, 2, 2, 0.1, 0.1])
+        # unused for now:
+        self.reward_target = -1e-3
 
         # Define initial pose and goal pose sampling distribution:
         lb_initial = torch.tensor([-POSITION_BOUND, -POSITION_BOUND, 0]*2, dtype=torch.float32).to(device)
@@ -80,7 +100,6 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.initial_pose_distribution = torch.distributions.uniform.Uniform(lb_initial, ub_initial)
 
         # Define circular obstacle sampling distribution:
-        self.num_obstacles = num_obstacles
         self.obstacles = torch.empty([num_envs, num_obstacles, 3]).to(device)
         lb_o = torch.tensor([-POSITION_BOUND, -POSITION_BOUND, OBSTACLE_MIN_RADIUS]*num_obstacles, dtype=torch.float32).to(device)
         ub_o = torch.tensor([POSITION_BOUND, POSITION_BOUND, OBSTACLE_MAX_RADIUS]*num_obstacles, dtype=torch.float32).to(device)
@@ -123,56 +142,81 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         super(AvantGoalEnv, self).__init__(num_envs=num_envs, observation_space=self.single_observation_space, action_space=self.single_action_space)
 
     def _observe(self, states: torch.Tensor) -> np.ndarray:
-        betas = states[:, self.dynamics.beta_idx].cpu().numpy()
-        dot_betas = states[:, self.dynamics.dot_beta_idx].cpu().numpy()
-        velocities = states[:, self.dynamics.v_f_idx].cpu().numpy()
-        return np.vstack([betas, dot_betas, velocities]).T
+        betas = states[:, self.dynamics.beta_idx, None].cpu().numpy()
+        dot_betas = states[:, self.dynamics.dot_beta_idx, None].cpu().numpy()
+        velocities = states[:, self.dynamics.v_f_idx, None].cpu().numpy()
+
+        return np.c_[betas, dot_betas, velocities]
     
-    def _compute_goals(self, states: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+    # It is conceptually incorrect for this to take the obstacles as argument, but copying the info dict is too slow for practical use, 
+    # so this is the best way (with stable baselines) to compute rewards which are dependent on the obstacles:
+    def _compute_goals(self, states: torch.Tensor, obstacles: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
         x_f = states[:, self.dynamics.x_f_idx].cpu().numpy()
         y_f = states[:, self.dynamics.y_f_idx].cpu().numpy()
+        beta = states[:, self.dynamics.beta_idx]
         theta_f = states[:, self.dynamics.theta_f_idx]
         x_goal = states[:, self.dynamics.x_goal_idx].cpu().numpy()
         y_goal = states[:, self.dynamics.y_goal_idx].cpu().numpy()
         theta_goal = states[:, self.dynamics.theta_goal_idx]
 
         s_theta_f, c_theta_f = torch.sin(theta_f).cpu().numpy(), torch.cos(theta_f).cpu().numpy()
+        s_beta_f, c_beta_f = torch.sin(beta).cpu().numpy(), torch.cos(beta).cpu().numpy()
         s_theta_goal, c_theta_goal = torch.sin(theta_goal).cpu().numpy(), torch.cos(theta_goal).cpu().numpy()
 
-        return np.vstack([x_f, y_f, s_theta_f, c_theta_f]).T, np.vstack([x_goal, y_goal, s_theta_goal, c_theta_goal]).T
+        obstacle_info = obstacles.view(-1, self.num_obstacles * 3).cpu().numpy()
 
-    def _construct_observation(self, states: torch.Tensor, tmp: bool=False):
-        achieved_goals, desired_goals = self._compute_goals(states)
+        return (
+            np.c_[x_f, y_f, s_theta_f, c_theta_f, s_beta_f, c_beta_f, obstacle_info], 
+            np.c_[x_goal, y_goal, s_theta_goal, c_theta_goal, np.zeros_like(s_theta_f), np.zeros_like(c_theta_f), obstacle_info]
+        )
+
+    def _construct_observation(self, states: torch.Tensor, obstacles: torch.Tensor, tmp: bool=False):
+        achieved_goals, desired_goals = self._compute_goals(states, obstacles)
         obs = {
             "achieved_goal": achieved_goals,
             "desired_goal": desired_goals,
             "observation": self._observe(states)
         }
         if not tmp:
-            obs["occupancy_grid"] = create_occupancy_grids(self.obstacles, cell_size=0.0925, axis_limit=2*POSITION_BOUND)
+            obs["occupancy_grid"] = create_occupancy_grids(self.obstacles, cell_size=0.078, axis_limit=2*POSITION_BOUND, encoder=self.encoder)
         return obs
 
     def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict], p=0.5) -> float:
         x = achieved_goal[:, 0]
         y = achieved_goal[:, 1]
+        sin_c_a, cos_c_a = achieved_goal[:, 2], achieved_goal[:, 3]
+        sin_beta, cos_beta = achieved_goal[:, 4], achieved_goal[:, 5]
         cx = desired_goal[:, 0]
         cy = desired_goal[:, 1]
-        sin_c, cos_c = desired_goal[:, 2], desired_goal[:, 3]
+        sin_c_d, cos_c_d = desired_goal[:, 2], desired_goal[:, 3]
 
-        cx = cx + cos_c*(PALLET_OFFSET + PALET_RADIUS)
-        cy = cy + sin_c*(PALLET_OFFSET + PALET_RADIUS)
+        # TODO: append a pallet obstacle and handle this with the other obstacles:
+        cx = cx + cos_c_d*(PALLET_OFFSET + PALET_RADIUS)
+        cy = cy + sin_c_d*(PALLET_OFFSET + PALET_RADIUS)
         dist = np.sqrt((cx - x)**2 + (cy - y)**2)
-        penalty = np.where(dist < PALET_RADIUS, 100*np.ones_like(dist), np.zeros_like(dist))
+        pallet_penalty = np.where(dist < PALET_RADIUS, 100*np.ones_like(dist), np.zeros_like(dist))
 
         reward = -np.power(
             np.dot(
-                np.abs(achieved_goal - desired_goal),
+                np.abs(achieved_goal[:, :6] - desired_goal[:, :6]),
                 self.reward_weights,
             ),
             p,
         )
 
-        return reward - penalty
+        # Front link collision check:
+        obstacles = desired_goal[:, 6:].reshape((-1, self.num_obstacles, 3))
+        dist_f = np.sqrt((x[:, np.newaxis] - obstacles[:, :, 0])**2 + (y[:, np.newaxis] - obstacles[:, :, 1])**2)
+        obstacle_penalty_f = np.where(np.any(dist_f < obstacles[:, :, 2] + MACHINE_RADIUS, axis=1), 10*np.ones(x.shape[0]), np.zeros(x.shape[0]))
+        # Rear link collision check: (TODO: should probably be computed exactly like the visual bounding circle)
+        x_r = x - HALF_MACHINE_LENGTH/2 * cos_c_a - HALF_MACHINE_LENGTH/2 * (cos_beta * cos_c_a - sin_beta * sin_c_a)  # cos(a+b) = cos a * cos b - sin a * sin b
+        y_r = y - HALF_MACHINE_LENGTH/2 * sin_c_a - HALF_MACHINE_LENGTH/2 * (sin_beta * cos_c_a + cos_beta * sin_c_a)  # sin(a+b) = sin a * cos b - cos a * sin b
+        dist_r = np.sqrt((x_r[:, np.newaxis] - obstacles[:, :, 0])**2 + (y_r[:, np.newaxis] - obstacles[:, :, 1])**2)
+        obstacle_penalty_r = np.where(np.any(dist_r < obstacles[:, :, 2] + MACHINE_RADIUS, axis=1), np.ones(x.shape[0]), np.zeros(x.shape[0]))
+
+        obstacle_penalty = obstacle_penalty_f + obstacle_penalty_r
+
+        return reward - pallet_penalty - obstacle_penalty
     
     def _simulate_lidar(self):
         origins = self.states[:, :2].cpu().numpy()
@@ -192,7 +236,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.num_steps += 1
 
         info = [{} for i in range(self.num_envs)]
-        tmp_obs = self._construct_observation(self.states, tmp=True)
+        tmp_obs = self._construct_observation(self.states, self.obstacles)
         reward = self.compute_reward(tmp_obs["achieved_goal"], tmp_obs["desired_goal"], info)
 
         terminated = torch.from_numpy(reward > self.reward_target).to(self.states.device)
@@ -212,8 +256,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             # Reset done envs:
             self._internal_reset(done_indices)
 
-        self._simulate_lidar()
-        obs = self._construct_observation(self.states)
+        # self._simulate_lidar()
+        obs = self._construct_observation(self.states, self.obstacles)
 
         return obs, reward, done.cpu().numpy(), info
     
@@ -263,7 +307,6 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             # Set diagonal elements to infinity to ignore self-distance
             torch.diagonal(edge_to_edge_distances, dim1=-2, dim2=-1).fill_(float('inf'))
             min_edge_to_edge_distance = torch.amin(edge_to_edge_distances, dim=[1, 2])
-
             valid_indices = torch.argwhere(
                 (i_g_dist > 7.5) &
                 (min_i_f_o_dist > 2.5*HALF_MACHINE_WIDTH) &
@@ -273,22 +316,19 @@ class AvantGoalEnv(VecEnv, GoalEnv):
 
             # Apply all the valid env samples:
             n_valid = min(envs_left, len(valid_indices))
-
             if n_valid == 0:
                 continue
-
             updated_env_indices = indices[:n_valid]
             np_valid_indices = valid_indices.cpu().numpy()[:n_valid]
-
             self.states[updated_env_indices, :3] = pose_samples[np_valid_indices, :3]
             self.states[updated_env_indices, 3:6] = torch.zeros((n_valid, 3)).to(self.states.device)
             self.states[updated_env_indices, 6:9] = pose_samples[np_valid_indices, 3:6]
             self.num_steps[updated_env_indices] = 0
             self.obstacles[updated_env_indices] = obstacles[np_valid_indices]
-
             if len(valid_indices) >= envs_left:
                 break
 
+            # Resample the remaining envs:
             envs_left -= n_valid
             indices = indices[n_valid:]
 
@@ -308,7 +348,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         else:
             self._internal_reset(torch.arange(self.num_envs).to(self.states.device))
 
-        return self._construct_observation(self.states)
+        return self._construct_observation(self.states, self.obstacles)
 
     def render(self, indices: List[int] = [0], mode='rgb_array', horizon: np.ndarray = np.array([])):
         if len(horizon):
@@ -345,23 +385,22 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                     center=(center + pos_to_pixel_scaler*x_obs[i, j], center + pos_to_pixel_scaler*y_obs[i, j]),
                     radius=pos_to_pixel_scaler*r_obs[i, j])
 
+            # Visualizing avant front collision bound:
             pygame.draw.circle(alpha_surf, RED, 
                                center=(center + pos_to_pixel_scaler*(x_f[i]), center + pos_to_pixel_scaler*(y_f[i])),
                                radius=pos_to_pixel_scaler*MACHINE_RADIUS)
             
-            # Visualizing avant collision bound:
+            # Visualizing avant rear collision bound:
             x_off = pos_to_pixel_scaler*(
                 x_f[i] 
                 - np.cos(theta_f[i]) * np.cos(betas[i]/4)*HALF_MACHINE_LENGTH/2 
                 - np.sin(theta_f[i]) * np.sin(betas[i]/4)*HALF_MACHINE_LENGTH/2 
-
                 - np.cos(-theta_f[i] - betas[i]) * HALF_MACHINE_LENGTH/2 
             )
             y_off = pos_to_pixel_scaler*(
                 y_f[i] 
                 - np.sin(theta_f[i]) * np.cos(betas[i]/4)*HALF_MACHINE_LENGTH/2 
                 + np.cos(theta_f[i]) * np.sin(betas[i]/4)*HALF_MACHINE_LENGTH/2 
-
                 + np.sin(-theta_f[i] - betas[i]) * HALF_MACHINE_LENGTH/2 
             )
             pygame.draw.circle(alpha_surf, RED, 
@@ -447,7 +486,6 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             ])
             buffer = pygame.transform.flip(self.screen, True, False)
             buffer = pygame.surfarray.array3d(buffer)
-            #buffer = np.transpose(buffer, (1, 0, 2))
             frames[i] = buffer
         return np.concatenate(frames, axis=1)
     

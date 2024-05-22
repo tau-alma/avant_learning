@@ -6,9 +6,8 @@ from gymnasium import spaces
 from torch import nn
 from stable_baselines3.common.preprocessing import get_flattened_obs_dim, is_image_space
 from stable_baselines3.common.type_aliases import TensorDict
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, NatureCNN
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from typing import Dict
-
 
 class GoalEnv(ABC):
     """
@@ -68,8 +67,7 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
     def __init__(
         self,
         observation_space: spaces.Dict,
-        cnn_output_dim: int = 256,
-        normalized_image: bool = False,
+        normalized_image: bool = True,
     ) -> None:
         # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
         super().__init__(observation_space, features_dim=1)
@@ -79,8 +77,7 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         total_concat_size = 0
         for key, subspace in observation_space.spaces.items():
             if is_image_space(subspace, normalized_image=normalized_image):
-                extractors[key] = NatureCNN(subspace, features_dim=cnn_output_dim, normalized_image=normalized_image)
-                total_concat_size += cnn_output_dim
+                raise ValueError("Trying to extract image")
             else:
                 # The observation key is a vector, flatten it if needed
                 extractors[key] = nn.Flatten()
@@ -89,21 +86,29 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         self.extractors = nn.ModuleDict(extractors)
 
         # Update the features dim manually
-        self._features_dim = 9 # total_concat_size
+        self._features_dim = 9 + 64 # total_concat_size
 
     def forward(self, observations: TensorDict) -> torch.Tensor:
         achieved = self.extractors["achieved_goal"](observations["achieved_goal"])
         desired = self.extractors["desired_goal"](observations["desired_goal"])
         obs = self.extractors["observation"](observations["observation"])
+        z = self.extractors["occupancy_grid"](observations["occupancy_grid"])
 
         pos_residual = desired[:, :2] - achieved[:, :2]
         achieved_hdg_data = achieved[:, 2:4]
         desired_hdg_data = desired[:, 2:4]
 
-        encoded_tensor_list = [pos_residual, achieved_hdg_data, desired_hdg_data, obs]
-
-        return torch.cat(encoded_tensor_list, dim=1)
-    
+        encoded_tensor_list = [pos_residual, achieved_hdg_data, desired_hdg_data, obs, z]
+        
+        try:
+            retval = torch.cat(encoded_tensor_list, dim=1)
+        except:
+            print(observations["occupancy_grid"].shape)
+            for t in encoded_tensor_list:
+                print(t.shape)
+            raise RuntimeError("noped out")
+        
+        return retval
 
 
 def rotate_image(image, angle, p_rot):
@@ -126,7 +131,7 @@ def rotate_image(image, angle, p_rot):
     
     return rotated_large_surface, center_of_rotated
 
-def create_occupancy_grids(obstacles, cell_size, axis_limit):
+def create_occupancy_grids(obstacles, cell_size, axis_limit, encoder):
     device = obstacles.device
     
     # Calculate grid size based on the axis limits and cell size
@@ -155,8 +160,12 @@ def create_occupancy_grids(obstacles, cell_size, axis_limit):
 
             # Update the occupancy grid: mark as occupied if within the normalized radius
             occupancy_grids[i] |= (distance_squared <= r**2)
+    
+    occupancy_grids = occupancy_grids.unsqueeze(1).to(torch.float32)
+    if encoder is not None:
+        occupancy_grids = encoder.encode(occupancy_grids)[0]
 
-    return occupancy_grids.to('cpu').numpy().astype(int)
+    return occupancy_grids.to('cpu').numpy().astype(np.float32)
 
 def precompute_lidar_direction_vectors(num_rays, max_distance):
     angles = np.linspace(0, 2 * np.pi, num_rays)
@@ -178,7 +187,6 @@ def circle_ray_intersection(ray_origin, ray_direction, circle_center, radius):
     return np.inf
 
 def simulate_lidar(origin, rtree_index, angles, direction_vectors):
-    print(rtree_index)
     distances = []
     for dir_vector in direction_vectors:
         end_point = origin + dir_vector
