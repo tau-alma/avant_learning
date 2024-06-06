@@ -90,7 +90,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.states = torch.empty([num_envs, len(self.dynamics.lbx)]).to(device)
         self.num_steps = torch.zeros(num_envs).to(device)
         # weights for: [x, y, sin_theta, cos_theta, sin_beta, cos_beta]
-        self.reward_weights = np.array([1, 1, 2, 2, 0.1, 0.1])
+        self.reward_weights = np.array([1, 1, 2, 2, 0.0, 0.0])
         # unused for now:
         self.reward_target = -1e-3
 
@@ -163,12 +163,18 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         s_beta_f, c_beta_f = torch.sin(beta).cpu().numpy(), torch.cos(beta).cpu().numpy()
         s_theta_goal, c_theta_goal = torch.sin(theta_goal).cpu().numpy(), torch.cos(theta_goal).cpu().numpy()
 
-        obstacle_info = obstacles.view(-1, self.num_obstacles * 3).cpu().numpy()
+        if self.num_obstacles > 0:
+            obstacle_info = obstacles.view(-1, self.num_obstacles * 3).cpu().numpy()
+            return (
+                np.c_[x_f, y_f, s_theta_f, c_theta_f, s_beta_f, c_beta_f, obstacle_info], 
+                np.c_[x_goal, y_goal, s_theta_goal, c_theta_goal, np.zeros_like(s_theta_f), np.zeros_like(c_theta_f), obstacle_info]
+            )
+        else:
+            return (
+                np.c_[x_f, y_f, s_theta_f, c_theta_f, s_beta_f, c_beta_f], 
+                np.c_[x_goal, y_goal, s_theta_goal, c_theta_goal, np.zeros_like(s_theta_f), np.zeros_like(c_theta_f)]
+            )
 
-        return (
-            np.c_[x_f, y_f, s_theta_f, c_theta_f, s_beta_f, c_beta_f, obstacle_info], 
-            np.c_[x_goal, y_goal, s_theta_goal, c_theta_goal, np.zeros_like(s_theta_f), np.zeros_like(c_theta_f), obstacle_info]
-        )
 
     def _construct_observation(self, states: torch.Tensor, obstacles: torch.Tensor, tmp: bool=False):
         achieved_goals, desired_goals = self._compute_goals(states, obstacles)
@@ -178,7 +184,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             "observation": self._observe(states)
         }
         if not tmp:
-            obs["occupancy_grid"] = create_occupancy_grids(self.obstacles, cell_size=0.078, axis_limit=2*POSITION_BOUND, encoder=self.encoder)
+            obs["occupancy_grid"] = np.zeros((self.num_envs, 64), dtype=np.float32)#create_occupancy_grids(self.obstacles, cell_size=0.078, axis_limit=2*POSITION_BOUND, encoder=self.encoder)
         return obs
 
     def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict], p=0.5) -> float:
@@ -204,17 +210,18 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             p,
         )
 
-        # Front link collision check:
-        obstacles = desired_goal[:, 6:].reshape((-1, self.num_obstacles, 3))
-        dist_f = np.sqrt((x[:, np.newaxis] - obstacles[:, :, 0])**2 + (y[:, np.newaxis] - obstacles[:, :, 1])**2)
-        obstacle_penalty_f = np.where(np.any(dist_f < obstacles[:, :, 2] + MACHINE_RADIUS, axis=1), 10*np.ones(x.shape[0]), np.zeros(x.shape[0]))
-        # Rear link collision check: (TODO: should probably be computed exactly like the visual bounding circle)
-        x_r = x - HALF_MACHINE_LENGTH/2 * cos_c_a - HALF_MACHINE_LENGTH/2 * (cos_beta * cos_c_a - sin_beta * sin_c_a)  # cos(a+b) = cos a * cos b - sin a * sin b
-        y_r = y - HALF_MACHINE_LENGTH/2 * sin_c_a - HALF_MACHINE_LENGTH/2 * (sin_beta * cos_c_a + cos_beta * sin_c_a)  # sin(a+b) = sin a * cos b - cos a * sin b
-        dist_r = np.sqrt((x_r[:, np.newaxis] - obstacles[:, :, 0])**2 + (y_r[:, np.newaxis] - obstacles[:, :, 1])**2)
-        obstacle_penalty_r = np.where(np.any(dist_r < obstacles[:, :, 2] + MACHINE_RADIUS, axis=1), np.ones(x.shape[0]), np.zeros(x.shape[0]))
-
-        obstacle_penalty = obstacle_penalty_f + obstacle_penalty_r
+        obstacle_penalty = 0
+        if self.num_obstacles > 0:
+            # Front link collision check:
+            obstacles = desired_goal[:, 6:].reshape((-1, self.num_obstacles, 3))
+            dist_f = np.sqrt((x[:, np.newaxis] - obstacles[:, :, 0])**2 + (y[:, np.newaxis] - obstacles[:, :, 1])**2)
+            obstacle_penalty_f = np.where(np.any(dist_f < obstacles[:, :, 2] + MACHINE_RADIUS, axis=1), 0 * np.ones(x.shape[0]), np.zeros(x.shape[0]))
+            # Rear link collision check: (TODO: should probably be computed exactly like the visual bounding circle)
+            x_r = x - HALF_MACHINE_LENGTH/2 * cos_c_a - HALF_MACHINE_LENGTH/2 * (cos_beta * cos_c_a - sin_beta * sin_c_a)  # cos(a+b) = cos a * cos b - sin a * sin b
+            y_r = y - HALF_MACHINE_LENGTH/2 * sin_c_a - HALF_MACHINE_LENGTH/2 * (sin_beta * cos_c_a + cos_beta * sin_c_a)  # sin(a+b) = sin a * cos b - cos a * sin b
+            dist_r = np.sqrt((x_r[:, np.newaxis] - obstacles[:, :, 0])**2 + (y_r[:, np.newaxis] - obstacles[:, :, 1])**2)
+            obstacle_penalty_r = np.where(np.any(dist_r < obstacles[:, :, 2] + MACHINE_RADIUS, axis=1), 0 * np.ones(x.shape[0]), np.zeros(x.shape[0]))
+            obstacle_penalty = obstacle_penalty_f + obstacle_penalty_r
 
         return reward - pallet_penalty - obstacle_penalty
     
@@ -278,41 +285,49 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         envs_left = len(indices)
         while True:        
             pose_samples = self.initial_pose_distribution.sample((N_SAMPLES,))
-            obstacles = self.obstacle_position_distribution.sample((N_SAMPLES,)).view(N_SAMPLES, self.num_obstacles, 3)
 
             # Initial pose should be far enough away from goal pose:
             i_g_dist = torch.norm(pose_samples[:, :2] - pose_samples[:, 3:5], dim=1)
         
-            # Initial pose should be far enough away from any obstacle:
-            machine_center_points = pose_samples[:, :2].clone()
-            machine_center_points[:, 0] -= torch.cos(pose_samples[:, 2]) * HALF_MACHINE_LENGTH
-            machine_center_points[:, 1] -= torch.sin(pose_samples[:, 2]) * HALF_MACHINE_LENGTH
-            i_f_o_diff = obstacles[:, :, :2] - machine_center_points.unsqueeze(1).expand(-1, self.num_obstacles, -1)
-            i_f_o_dist = torch.norm(i_f_o_diff, dim=2) - (obstacles[:, :, 2] + HALF_MACHINE_LENGTH)
-            min_i_f_o_dist = torch.amin(i_f_o_dist, dim=[1])
+            if self.num_obstacles > 0:
+                obstacles = self.obstacle_position_distribution.sample((N_SAMPLES,)).view(N_SAMPLES, self.num_obstacles, 3)
+                # Initial pose should be far enough away from any obstacle:
+                machine_center_points = pose_samples[:, :2].clone()
+                machine_center_points[:, 0] -= torch.cos(pose_samples[:, 2]) * HALF_MACHINE_LENGTH
+                machine_center_points[:, 1] -= torch.sin(pose_samples[:, 2]) * HALF_MACHINE_LENGTH
+                i_f_o_diff = obstacles[:, :, :2] - machine_center_points.unsqueeze(1).expand(-1, self.num_obstacles, -1)
+                i_f_o_dist = torch.norm(i_f_o_diff, dim=2) - (obstacles[:, :, 2] + HALF_MACHINE_LENGTH)
+                min_i_f_o_dist = torch.amin(i_f_o_dist, dim=[1])
 
-            # Goal pose should be far enough away from any obstacle:
-            goal_center_points = pose_samples[:, 3:5]
-            g_o_diff = obstacles[:, :, :2] - goal_center_points.unsqueeze(1).expand(-1, self.num_obstacles, -1)
-            g_o_dist = torch.norm(g_o_diff, dim=2) - (obstacles[:, :, 2] + 2*HALF_MACHINE_LENGTH)
-            min_g_o_dist = torch.amin(g_o_dist, dim=[1])
+                # Goal pose should be far enough away from any obstacle:
+                goal_center_points = pose_samples[:, 3:5]
+                g_o_diff = obstacles[:, :, :2] - goal_center_points.unsqueeze(1).expand(-1, self.num_obstacles, -1)
+                g_o_dist = torch.norm(g_o_diff, dim=2) - (obstacles[:, :, 2] + 2*HALF_MACHINE_LENGTH)
+                min_g_o_dist = torch.amin(g_o_dist, dim=[1])
 
-            # The distance between each obstacle should be big enough to drive through:
-            a_expanded_row = obstacles[:, :, :2].unsqueeze(2).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles, 2)
-            a_expanded_col = obstacles[:, :, :2].unsqueeze(1).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles, 2)
-            diff = a_expanded_row - a_expanded_col
-            radii_expanded_row = obstacles[:, :, 2].unsqueeze(2).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles)
-            radii_expanded_col = obstacles[:, :, 2].unsqueeze(1).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles)
-            edge_to_edge_distances = torch.norm(diff, p=2, dim=3) - (radii_expanded_row + radii_expanded_col)
-            # Set diagonal elements to infinity to ignore self-distance
-            torch.diagonal(edge_to_edge_distances, dim1=-2, dim2=-1).fill_(float('inf'))
-            min_edge_to_edge_distance = torch.amin(edge_to_edge_distances, dim=[1, 2])
-            valid_indices = torch.argwhere(
-                (i_g_dist > 7.5) &
-                (min_i_f_o_dist > 2.5*HALF_MACHINE_WIDTH) &
-                (min_g_o_dist > 2.5*HALF_MACHINE_WIDTH) & 
-                (min_edge_to_edge_distance > 2.5*HALF_MACHINE_WIDTH)
-            ).flatten()
+                # The distance between each obstacle should be big enough to drive through:
+                a_expanded_row = obstacles[:, :, :2].unsqueeze(2).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles, 2)
+                a_expanded_col = obstacles[:, :, :2].unsqueeze(1).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles, 2)
+                diff = a_expanded_row - a_expanded_col
+                radii_expanded_row = obstacles[:, :, 2].unsqueeze(2).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles)
+                radii_expanded_col = obstacles[:, :, 2].unsqueeze(1).expand(N_SAMPLES, self.num_obstacles, self.num_obstacles)
+                edge_to_edge_distances = torch.norm(diff, p=2, dim=3) - (radii_expanded_row + radii_expanded_col)
+                # Set diagonal elements to infinity to ignore self-distance
+                torch.diagonal(edge_to_edge_distances, dim1=-2, dim2=-1).fill_(float('inf'))
+                min_edge_to_edge_distance = torch.amin(edge_to_edge_distances, dim=[1, 2])
+
+                # Check which samples satisfy all conditions:
+                valid_indices = torch.argwhere(
+                    (i_g_dist > 7.5) &
+                    (min_i_f_o_dist > 2.5*HALF_MACHINE_WIDTH) &
+                    (min_g_o_dist > 2.5*HALF_MACHINE_WIDTH) & 
+                    (min_edge_to_edge_distance > 3*HALF_MACHINE_WIDTH)
+                ).flatten()
+            else:
+                # Check which samples satisfy all conditions:
+                valid_indices = torch.argwhere(
+                    (i_g_dist > 7.5)
+                ).flatten()
 
             # Apply all the valid env samples:
             n_valid = min(envs_left, len(valid_indices))
@@ -324,7 +339,10 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             self.states[updated_env_indices, 3:6] = torch.zeros((n_valid, 3)).to(self.states.device)
             self.states[updated_env_indices, 6:9] = pose_samples[np_valid_indices, 3:6]
             self.num_steps[updated_env_indices] = 0
-            self.obstacles[updated_env_indices] = obstacles[np_valid_indices]
+
+            if self.num_obstacles > 0:
+                self.obstacles[updated_env_indices] = obstacles[np_valid_indices]
+
             if len(valid_indices) >= envs_left:
                 break
 

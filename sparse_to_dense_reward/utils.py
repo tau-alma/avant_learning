@@ -86,7 +86,7 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         self.extractors = nn.ModuleDict(extractors)
 
         # Update the features dim manually
-        self._features_dim = 9 + 64 # total_concat_size
+        self._features_dim = 9 #64 # total_concat_size
 
     def forward(self, observations: TensorDict) -> torch.Tensor:
         achieved = self.extractors["achieved_goal"](observations["achieved_goal"])
@@ -98,7 +98,7 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         achieved_hdg_data = achieved[:, 2:4]
         desired_hdg_data = desired[:, 2:4]
 
-        encoded_tensor_list = [pos_residual, achieved_hdg_data, desired_hdg_data, obs, z]
+        encoded_tensor_list = [pos_residual, achieved_hdg_data, desired_hdg_data, obs]
         
         try:
             retval = torch.cat(encoded_tensor_list, dim=1)
