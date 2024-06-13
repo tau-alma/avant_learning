@@ -36,13 +36,14 @@ MACHINE_RADIUS = 0.8
 class AvantGoalEnv(VecEnv, GoalEnv):
     RENDER_RESOLUTION = 1280
 
-    def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, num_obstacles: int = 0, num_processes: int = 1, encoder: torch.nn.Module = None):
+    def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, num_obstacles: int = 0, encoder: torch.nn.Module = None, eval=False):
         self.num_envs = num_envs
         self.time_limit_s = time_limit_s
         self.device = device
         self.num_obstacles = num_obstacles
         self.encoder = encoder
-        self.dynamics = AvantDynamics(dt=dt, device=device)
+        self.eval = eval
+        self.dynamics = AvantDynamics(dt=dt, device=device, eval=eval)
 
         n_actions = len(self.dynamics.control_scalers.cpu().numpy())
         self.single_action_space = spaces.Box(
@@ -52,20 +53,6 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         l_achieved, l_desired = self._compute_goals(self.dynamics.lbx.unsqueeze(0), torch.zeros((1, num_obstacles, 3)))
         u_achieved, u_desired = self._compute_goals(self.dynamics.ubx.unsqueeze(0), torch.zeros((1, num_obstacles, 3)))
 
-        # TODO: avoid hardcoding the shape...
-        if encoder is not None:
-            ogm_space = spaces.Box(
-                low=-np.inf * np.ones(64),
-                high=np.inf * np.ones(64),
-                dtype=np.float32
-            )
-        else:
-            ogm_space = spaces.Box(
-                low=np.zeros((1, 256, 256)),
-                high=np.ones((1, 256, 256)),
-                dtype=np.float32
-            )
-            
         self.single_observation_space = spaces.Dict(
             dict(
                 observation=spaces.Box(
@@ -83,14 +70,18 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                     high=u_desired.flatten(),
                     dtype=np.float32
                 ),
-                occupancy_grid = ogm_space
+                occupancy_grid = spaces.Box(
+                    low=-np.inf * np.ones(64),
+                    high=np.inf * np.ones(64),
+                    dtype=np.float32
+                )
             )
         )
         
         self.states = torch.empty([num_envs, len(self.dynamics.lbx)]).to(device)
         self.num_steps = torch.zeros(num_envs).to(device)
         # weights for: [x, y, sin_theta, cos_theta, sin_beta, cos_beta]
-        self.reward_weights = np.array([1, 1, 2, 2, 0.0, 0.0])
+        self.reward_weights = np.array([1, 1, 2, 2, 0.1, 0.1])
         # unused for now:
         self.reward_target = -1e-3
 
@@ -131,7 +122,6 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.pallet_image = pygame.transform.scale(pallet_image, (pallet_scale_factor*pallet_image.get_width(), pallet_scale_factor*pallet_image.get_height()))
 
         # For 2D lidar "simulation" using R-trees:
-        self.num_processes = num_processes
         self.r_tree_indices = [None for _ in range(num_envs)]
         self.lidar_angles, self.lidar_direction_vectors = precompute_lidar_direction_vectors(num_rays=180, max_distance=5)
         self.lidar_points = torch.empty([num_envs, len(self.lidar_angles), 2]).to(device)
@@ -187,7 +177,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             obs["occupancy_grid"] = np.zeros((self.num_envs, 64), dtype=np.float32)#create_occupancy_grids(self.obstacles, cell_size=0.078, axis_limit=2*POSITION_BOUND, encoder=self.encoder)
         return obs
 
-    def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict], p=0.5) -> float:
+    def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict], p=0.75) -> float:
         x = achieved_goal[:, 0]
         y = achieved_goal[:, 1]
         sin_c_a, cos_c_a = achieved_goal[:, 2], achieved_goal[:, 3]

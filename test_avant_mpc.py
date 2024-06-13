@@ -15,6 +15,7 @@ from mpc_solvers.acados_solver import AcadosSolver
 class MPCActor:
     def __init__(self, solver_class, linearize=False):
         self.history = []
+        self.last_steer = 0
         super().__init__()
 
         fake_inf = 1e7
@@ -25,27 +26,29 @@ class MPCActor:
         theta_f = cs.MX.sym("theta_f")
         beta = cs.MX.sym("beta")
         dot_beta = cs.MX.sym("dot_beta")
-        v = cs.MX.sym("v")
-        ocp_x = cs.vertcat(x_f, y_f, theta_f, beta, dot_beta, v)
+        v_f_ref = cs.MX.sym("v_f_ref")
+        steer = cs.MX.sym("steer")
+
+        ocp_x = cs.vertcat(x_f, y_f, theta_f, beta, dot_beta, v_f_ref, steer)
         lbx_vec = np.array([
             -fake_inf, -fake_inf, -fake_inf, -config.avant_max_beta, -config.avant_max_dot_beta,
-            config.avant_min_v
+            config.avant_min_v, -1
         ])
         ubx_vec = np.array([
             fake_inf, fake_inf, fake_inf, config.avant_max_beta, config.avant_max_dot_beta, 
-            config.avant_max_v
+            config.avant_max_v, 1
         ])
         ocp_x_slacks = {3: 100, 4: 100, 5: 100}
 
         # Controls
-        dot_dot_beta = cs.MX.sym("dot_dot_beta")
-        a = cs.MX.sym("a")
-        ocp_u = cs.vertcat(dot_dot_beta, a)
+        dot_steer = cs.MX.sym("dot_steer")
+        a_f = cs.MX.sym("a_f")
+        ocp_u = cs.vertcat(dot_steer, a_f)
         lbu_vec = np.array([
-            -config.avant_max_dot_dot_beta, -config.avant_max_a
+            -1, -config.avant_max_a
         ])
         ubu_vec = np.array([
-            config.avant_max_dot_dot_beta, config.avant_max_a,
+            1, config.avant_max_a,
         ])
 
         # Params
@@ -58,17 +61,26 @@ class MPCActor:
         terminal_ocp_p = cs.vertcat(x_goal, y_goal, theta_goal)
 
         # Continuous dynamics:
-        alpha = cs.pi + beta
-        omega_f = v * config.avant_lf / cs.tan(alpha/2)
-        dot_beta_omega_f = 0.5 * dot_beta
-        omega_f -= dot_beta_omega_f
+        omega_f = -(
+            (config.avant_lr * dot_beta + v_f_ref * cs.sin(beta)) 
+            / (config.avant_lf * cs.cos(beta) + config.avant_lr)
+        )
+
+        a = 0.127                  # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
+        b = 0.495                  # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
+        eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
+        eps = eps0 - beta
+        k = 10 * a * b * cs.sin(eps) / cs.sqrt(a**2 + b**2 - 2*a*b*cs.cos(eps))
+        dot_dot_beta = (dot_steer * k) / k**2
+
         f_expr = cs.vertcat(
-            v * cs.cos(theta_f),
-            v * cs.sin(theta_f),
+            v_f_ref * cs.cos(theta_f),
+            v_f_ref * cs.sin(theta_f),
             omega_f,
             dot_beta,
             dot_dot_beta,
-            a
+            a_f,
+            dot_steer
         )
         f = cs.Function('f', [ocp_x, ocp_u, ocp_p], [f_expr])
 
@@ -82,7 +94,7 @@ class MPCActor:
         # l_t = cs.Function('l_t', [ocp_x, terminal_ocp_p], [goal_scaled_dist + goal_heading])
 
         problem = SymbolicMPCProblem(
-            N=1,
+            N=5,
             h=0.2,
             ocp_x=ocp_x,
             lbx_vec=lbx_vec,
@@ -102,18 +114,21 @@ class MPCActor:
         neural_cost_state = cs.vertcat(x_goal - x_f,       y_goal - y_f,    
                                        cs.sin(theta_f),    cs.cos(theta_f), 
                                        cs.sin(theta_goal), cs.cos(theta_goal), 
-                                       beta, dot_beta, v, 
+                                       beta, dot_beta, v_f_ref, 
                                        0, 0)
         model = torch.load("avant_critic").eval()
         problem.add_terminal_neural_cost(model=model, model_state=neural_cost_state, linearize=linearize)
 
         self.solver = solver_class(problem, rebuild=True)
+    
+    def reset(self):
+        self.last_steer = 0
 
     def act(self, observation) -> np.ndarray:
         obs = observation["observation"][0][:3]
         achieved_goal = observation["achieved_goal"][0]
         achieved_goal = np.r_[achieved_goal[:2], np.arctan2(achieved_goal[2], achieved_goal[3])]
-        obs = np.r_[achieved_goal, obs]
+        obs = np.r_[achieved_goal, obs, self.last_steer]
 
         desired_goal = observation["desired_goal"][0]
         desired_goal = np.r_[desired_goal[:2], np.arctan2(desired_goal[2], desired_goal[3])]
@@ -127,7 +142,9 @@ class MPCActor:
         self.history.append((t2-t1)/1e6)
         print(np.asarray(self.history).mean())
 
-        return sol_u[0], sol_x[2:, :4]
+        controls = np.r_[sol_x[1, 6], sol_u[0, 0], sol_x[1, 5]/3.5] # steer, dot_steer and gas (~= v_f_ref/3.5)
+
+        return controls, sol_x[2:, :4]
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -145,7 +162,7 @@ if __name__ == "__main__":
         raise ValueError(f"Unknown solver {args.solver}")
     
     # Initialize environment and actor
-    env = AvantGoalEnv(num_envs=1, dt=0.1, time_limit_s=30, device='cpu', num_obstacles=5)
+    env = AvantGoalEnv(num_envs=1, dt=0.1, time_limit_s=30, device='cpu', num_obstacles=0, eval=True)
     actor = MPCActor(solver_class=solver_class, linearize=args.linearize)
 
     screen = pygame.display.set_mode([env.RENDER_RESOLUTION, env.RENDER_RESOLUTION])
@@ -158,9 +175,7 @@ if __name__ == "__main__":
     frame_duration_ms = normal_frame_duration_ms * slow_motion_multiplier
 
     # Main simulation loop
-    initial_pose = [np.array([-0.5, -0.5, -np.pi/2], dtype=np.float32)]
-    goal_pose = [np.array([3.3, 3.3, 0], dtype=np.float32)]
-    obs = env.reset()#initial_pose, goal_pose)
+    obs = env.reset()
 
     while True:
         for _ in pygame.event.get():
@@ -170,7 +185,10 @@ if __name__ == "__main__":
         action, horizon = actor.act(obs)
         action /= env.dynamics.control_scalers.cpu().numpy()
         
-        obs, reward, done, _ = env.step(action.reshape(1, -1).astype(np.float32))
+        obs, reward, done, trunc = env.step(action.reshape(1, -1).astype(np.float32))
+
+        if done or trunc:
+            actor.reset()
 
         frame = env.render(mode='rgb_array', horizon=horizon)
         pygame.surfarray.blit_array(screen, frame.transpose(1, 0, 2))
