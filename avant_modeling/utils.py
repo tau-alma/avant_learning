@@ -5,6 +5,9 @@ import random
 import matplotlib.pyplot as plt
 import avant_modeling.config as config
 from scipy.signal import savgol_filter
+import seaborn as sns
+import pandas as pd
+from matplotlib.ticker import FormatStrFormatter
 
 
 def plot_sample_data(data, sample_indices, out_file):
@@ -45,15 +48,59 @@ def plot_sample_data(data, sample_indices, out_file):
     plt.close()
 
 
-def filter_data_batch(batch, data_idx_deriv, output_dir=None):
+def plot_error_density(errors, name, out_file):
+    num_errors = len(errors)
+    df_errors = pd.DataFrame({
+        'Error Type': [name] * num_errors + [name] * num_errors,
+        'Dynamics model': ['Nominal'] * num_errors + ['Nominal + GP'] * num_errors,
+        'Error': np.concatenate((
+            errors[:, 0], errors[:, 1]
+        ))
+    })
+
+    fig, ax = plt.subplots(figsize=(20, 10))
+    sns.set(font_scale=3.5)
+
+    if name in ["omega_f", "dot_beta"]:
+        xlabel = f"|{name}| error ($deg/s$)"
+    elif name == "v_f":
+        xlabel = f"|{name}| error ($m/s$)"
+    else:
+        xlabel = f"|{name}| error ($deg/s²$)"
+
+    sns.kdeplot(data=df_errors, x='Error', hue='Dynamics model', ax=ax, fill=True)
+    ax.set_title(' ', fontsize=40)
+    ax.set_ylabel("Density", fontsize=40)
+    ax.set_xlabel(xlabel, fontsize=40)
+    ax.set_xlim(left=0, right=max(
+            errors[:, 0].mean() + 2* errors[:, 0].std(),
+            errors[:, 1].mean() + 2* errors[:, 1].std(),
+        )
+    )
+    ax.tick_params(axis='both', which='major', labelsize=40)
+    ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+
+    # Adjust layout
+    plt.tight_layout()
+    plt.savefig(out_file, bbox_inches='tight')
+    plt.close()
+
+
+def filter_data_batch(batch, data_idx_deriv_delay, output_dir=None):
     tmp_original = None
     tmp_filtered = None
     dt_ns = (batch[1:, 0] - batch[:-1, 0])
     window_size = int(1e9*config.savgol_p / np.mean(dt_ns))
 
     timestamps = batch[config.low_pass_window_size // 4: -config.low_pass_window_size // 4][:-1, 0].copy()
-    for idx, deriv, name in data_idx_deriv:
-        selected = batch[:, idx].copy()
+
+    for idx, deriv, delay, name in data_idx_deriv_delay:
+        if delay == 0:
+            selected = batch[:, idx].copy()
+        if delay > 0:
+            selected = batch[delay:, idx].copy()
+        if delay < 0:
+            selected = batch[:delay, idx].copy()
 
         if output_dir is not None:
             save_spectrum_plot(selected, 1e9 / np.mean(dt_ns), output_dir + "/data_spectrum_%s.png" % name)
@@ -77,6 +124,10 @@ def filter_data_batch(batch, data_idx_deriv, output_dir=None):
                 )[:-1]
             else:
                 savgol = selected[:-1]
+
+        if delay > 0 or delay < 0:
+            selected = np.r_[selected, np.zeros(np.abs(delay))]
+            savgol = np.r_[savgol, np.zeros(np.abs(delay))]
 
         if tmp_original is None:
             tmp_original = selected[:-1]

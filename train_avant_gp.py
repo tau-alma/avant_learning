@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 import matplotlib.pyplot as plt
 from scipy import interpolate
-from avant_modeling.utils import filter_data_batch, farthest_point_sampling, plot_sample_data
+from avant_modeling.utils import filter_data_batch, farthest_point_sampling, plot_sample_data, plot_error_density
 from avant_modeling.gp import GPModel
 
 DATA_SOURCE_DIR = 'avant_identification_data/'
@@ -94,7 +94,7 @@ if __name__ == '__main__':
         trained_gps.append(gp_model)
 
         scaler = 1
-        if name in ["omega_f", "dot_beta"]:
+        if name in ["omega_f", "dot_beta", "dot_dot_beta"]:
             scaler = 180/np.pi
 
         # Select GP dataset for evaluation by farthest point sampling:
@@ -119,7 +119,7 @@ if __name__ == '__main__':
             if name == "omega_f":
                 nominal = -(config.avant_lr * data[:, 5] + data[:, 6] * np.sin(data[:, 3])) / (config.avant_lf * np.cos(data[:, 3]) + config.avant_lr)
             elif name == "v_f":
-                nominal = 3.5*data[:, 8] - 0.085
+                nominal = 3.5*data[:, 8]
             elif name in ["dot_beta", "dot_dot_beta"]:
                 a = 0.127 # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
                 b = 0.495 # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
@@ -145,10 +145,10 @@ if __name__ == '__main__':
                 alpha=0.5, label="95 uncertainty interval"
             )      
 
-            nominal_error = np.sum((data[:, output_i] - nominal)**2)   
-            gp_error = np.sum((data[:, output_i] - mean)**2)     
-            nominal_errors.append(nominal_error)
-            gp_errors.append(gp_error)
+            nominal_error = np.abs(scaler*data[:, output_i] - scaler*nominal)
+            gp_error = np.abs(scaler*data[:, output_i] - scaler*mean)
+            nominal_errors.extend(nominal_error)
+            gp_errors.extend(gp_error)
 
             if name == "v_f":
                 gas_table = np.array([0.0, 0.0, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
@@ -163,16 +163,4 @@ if __name__ == '__main__':
 
         nominal_errors = np.asarray(nominal_errors)
         gp_errors = np.asarray(gp_errors)
-        print(f"{name}:\nNominal squared error: {nominal_errors.mean()} (+/- {2*nominal_errors.std()})\nGP squared error: {gp_errors.mean()} (+/- {2*gp_errors.std()})")
-        
-        means = [nominal_errors.mean(), gp_errors.mean()]
-        errors = [2 * nominal_errors.std(), 2 * gp_errors.std()]
-        fig, ax = plt.subplots(figsize=(20, 10))
-        plt.title(f"{name} mean squared error")
-        fig.tight_layout()
-        positions = np.arange(len(means))
-        bars = ax.bar(positions, means, yerr=errors, capsize=10, tick_label=["Nominal", "GP corrected"])
-
-        plt.savefig(os.path.join(RESULTS_DIR, f"{name}_squared_errors.png"))
-        plt.close()
-
+        plot_error_density(np.c_[nominal_errors, gp_errors], name=name, out_file=f"{RESULTS_DIR}/{name}_error_density.png")

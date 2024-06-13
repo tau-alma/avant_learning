@@ -50,6 +50,9 @@ class GPModel(torch.nn.Module):
         print(f'Actual covar: {self.model.covar_module.base_kernel.lengthscale}')
         print(f'Task noise: {torch.nn.functional.softplus(self.likelihood.raw_task_noises)}')
 
+    def fantasy_model(self, inputs, outputs):
+        self.model.set_train_data(inputs, outputs, False)
+
     def forward(self, x):
         with gpytorch.settings.fast_pred_var():
             return self.likelihood(self.model(x))
