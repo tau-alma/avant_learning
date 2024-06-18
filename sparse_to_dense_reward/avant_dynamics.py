@@ -17,8 +17,8 @@ class AvantDynamics:
     theta_goal_idx = 8
 
     # Control indices for RL:
-    u_dot_dot_beta_idx = 0
-    u_a_f_idx = 1
+    u_dot_beta_idx = 0
+    u_v_f_idx = 1
 
     # Control indices for MPC:
     u_steer_idx = 0
@@ -32,7 +32,7 @@ class AvantDynamics:
 
         # Define control normalization constants:
         if not eval:
-            self.control_scalers = torch.tensor([config.avant_max_dot_dot_beta, config.avant_max_a], dtype=torch.float32).to(device)
+            self.control_scalers = torch.tensor([config.avant_max_dot_beta, config.avant_max_v], dtype=torch.float32).to(device)
         else:
             self.control_scalers = torch.ones(3, dtype=torch.float32).to(device)
 
@@ -60,6 +60,24 @@ class AvantDynamics:
     def _rl_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
         u_values = self.control_scalers * u_values
 
+        desired_beta_accel = (u_values[:, self.u_dot_beta_idx]) / self.dt
+        desired_linear_accel = (u_values[:, self.u_v_f_idx]) / self.dt
+
+        limited_beta_accel = torch.max(
+            torch.min(
+                desired_beta_accel, 
+                config.avant_max_dot_dot_beta * torch.ones_like(desired_beta_accel).to(u_values.device)
+            ), 
+            -config.avant_max_dot_dot_beta * torch.ones_like(desired_beta_accel).to(u_values.device)
+        )
+        limited_linear_accel = torch.max(
+            torch.min(
+                desired_linear_accel, 
+                config.avant_max_a * torch.ones_like(desired_linear_accel).to(u_values.device)
+            ), 
+            -config.avant_max_a * torch.ones_like(desired_linear_accel).to(u_values.device)
+        )
+
         # To avoid accumulating beta even at the limits, we scale the dot_beta accordingly:
         distance_to_limit = config.avant_max_beta - torch.abs(x_values[:, self.beta_idx])
         scaling_factor = torch.min(distance_to_limit / (torch.abs(x_values[:, self.dot_beta_idx]) * self.dt + 1e-5), torch.tensor(1.0).to(x_values.device))
@@ -73,15 +91,17 @@ class AvantDynamics:
             x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.theta_f_idx]),
             omega_f,
             x_values[:, self.dot_beta_idx],
-            u_values[:, self.u_dot_dot_beta_idx],
-            u_values[:, self.u_a_f_idx],
+            limited_beta_accel,
+            limited_linear_accel,
             # TODO: move these away from here:
             torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal x
             torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal y
             torch.zeros(u_values.shape[0]).to(u_values.device)   # constant goal theta
         ]).T
+        
         next_state = x_values + self.dt * dot_state
         clamped_next_state = torch.max(torch.min(next_state, self.ubx), self.lbx)
+
         return clamped_next_state
     
     def _mpc_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
@@ -116,7 +136,7 @@ class AvantDynamics:
         eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
         eps = eps0 - x_values[:, self.beta_idx]
         k = 10 * a * b * np.sin(eps) / np.sqrt(a**2 + b**2 - 2*a*b*np.cos(eps))
-        nominal_dot_dot_beta = (u_values[:, self.u_dot_steer_idx] * k) / k**2
+        nominal_dot_dot_beta = u_values[:, self.u_dot_steer_idx] / k
         gp_dot_dot_beta_inputs = torch.vstack([
             x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], u_values[:, self.u_steer_idx], u_values[:, self.u_dot_steer_idx]
         ]).T
@@ -140,7 +160,7 @@ class AvantDynamics:
         return clamped_next_state 
 
     def discrete_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
-        if not eval:
+        if not self.eval:
             return self._rl_dynamics_fun(x_values, u_values)
         else:
             with torch.no_grad():

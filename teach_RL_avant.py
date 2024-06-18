@@ -10,9 +10,9 @@ from ogm_encoder.vae import VAE
 env = AvantGoalEnv(1000, 0.2, 30, "cuda:0", num_obstacles=0)
 env = VecMonitor(env)
 # env = VecNormalize(env)
-env = VecVideoRecorder(env, "./RL_outputs/video", record_video_trigger=lambda x: x % 1000 == 0, video_length=500)
+env = VecVideoRecorder(env, "./RL_outputs/video", record_video_trigger=lambda x: x % 1000 == 0, video_length=400)
 
-n_sampled_goal = 3
+n_sampled_goal = 5
 
 model = SAC(
     "MultiInputPolicy",
@@ -24,16 +24,16 @@ model = SAC(
     ),
     verbose=1,
     buffer_size=int(2e6),
-    learning_starts=1000*160,
-    learning_rate=1e-3,
-    gradient_steps=10,
+    learning_starts=1000*200,
+    learning_rate=3e-3,
+    gradient_steps=5,
     train_freq=1,
     gamma=0.9999,
-    batch_size=int(1e5),
+    batch_size=int(2e5),
     policy_kwargs=dict(
         net_arch=dict(
-            pi=[256]*5, 
-            qf=[256]*5
+            pi=[256]*3, 
+            qf=[128]*3
         ),
         n_critics=2,
         share_features_extractor=True,
@@ -41,8 +41,11 @@ model = SAC(
     ),
     tensorboard_log="./RL_outputs/debug"
 )
-model = SAC.load("sac_vant", env=env)
-model.gradient_steps = 10
-model.learning_rate = 1e-3
-model.learn(2.5e6)
-model.save("sac_vant")
+print(model.critic)
+# model = SAC.load("sac_vant", env=env)
+# model.load_replay_buffer("sac_buffer")
+# model.gradient_steps = 4
+# model.learning_rate = 3e-3
+model.learn(7.5e6)
+model.save("sac")
+model.save_replay_buffer("sac_buffer")
