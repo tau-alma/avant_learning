@@ -58,9 +58,11 @@ if __name__ == '__main__':
         ("omega_f", [3, 5, 6, 7], 4),            # inputs: beta, dot beta, v_f and steer
         ("v_f", [3, 8], 6),                      # inputs: beta and gas
         ("dot_beta", [9, 10, 11], 12),           # inputs: truncated_beta, truncated_v_f and delayed_steer
-        ("dot_dot_beta", [9, 12, 11, 14], 13)    # inputs: truncated_beta, truncated_dot_beta, delayed_steer and delayed_dot_steer
+        ("dot_dot_beta", [9, 12, 11, 14], 13),   # inputs: truncated_beta, truncated_dot_beta, delayed_steer and delayed_dot_steer
+
+        ("u_steer", [9, 10, 12], 11),           # inputs: truncated_beta, truncated_dot_beta and truncated_v_f 
+        ("u_gas", [3, 6], 8)                    # inputs: beta and v_f
     ]
-    trained_gps = []
     for name, input_indices, output_i in gp_datas:
         NAME_RESULT_DIR = os.path.join(RESULTS_DIR, name)
         os.makedirs(NAME_RESULT_DIR, exist_ok=True)
@@ -68,8 +70,8 @@ if __name__ == '__main__':
         if name == "omega_f":
             nominal = -(config.avant_lr * filtered_data[:, 5] + filtered_data[:, 6] * np.sin(filtered_data[:, 3])) / (config.avant_lf * np.cos(filtered_data[:, 3]) + config.avant_lr)
         elif name == "v_f":
-            nominal = 3.5*filtered_data[:, 8]
-        elif name in ["dot_beta", "dot_dot_beta"]:
+            nominal = 3*filtered_data[:, 8]
+        elif name in ["dot_beta", "dot_dot_beta", "u_steer"]:
             a = 0.127 # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
             b = 0.495 # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
             eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
@@ -80,18 +82,24 @@ if __name__ == '__main__':
                 nominal = filtered_data[:, 11] / k
             elif name == "dot_dot_beta":
                 nominal = (filtered_data[:, 14] * k) / k**2
+            elif name == "u_steer":
+                nominal = k * filtered_data[:, 12]
+        elif name == "u_gas":
+            nominal = filtered_data[:, 6] / 3
         nominal = torch.from_numpy(nominal)
+
+        print(name, nominal.shape, filtered_data[:, output_i].shape)
 
         gp_inputs = torch.from_numpy(filtered_data[:, input_indices]).to(torch.float).cuda()
         gp_targets = torch.from_numpy(filtered_data[:, output_i]).to(torch.float).cuda() - nominal[:].to(torch.float).cuda()
         gp_model = GPModel(gp_inputs, gp_targets, train_epochs=100, train_lr=1e-1)
-        torch.save(gp_inputs, os.path.join(NAME_RESULT_DIR, f"{name}_gp_inputs.pth"))
-        torch.save(gp_targets, os.path.join(NAME_RESULT_DIR, f"{name}_gp_targets.pth"))
-        torch.save(gp_model.state_dict(), os.path.join(NAME_RESULT_DIR, f"{name}_gp_model.pth"))
+        torch.save(gp_inputs.cpu(), os.path.join(NAME_RESULT_DIR, f"{name}_gp_inputs.pth"))
+        torch.save(gp_targets.cpu(), os.path.join(NAME_RESULT_DIR, f"{name}_gp_targets.pth"))
+        torch.save(gp_model.cpu().state_dict(), os.path.join(NAME_RESULT_DIR, f"{name}_gp_model.pth"))
         params = {k: v.cpu().numpy().tolist() for k, v in gp_model.state_dict().items()}
         with open(os.path.join(NAME_RESULT_DIR, f"{name}_gp_params.json"), "w") as outfile:
             outfile.write(json.dumps(params, indent=4))
-        trained_gps.append(gp_model)
+        gp_model = gp_model.cuda()
 
         scaler = 1
         if name in ["omega_f", "dot_beta", "dot_dot_beta"]:
@@ -119,8 +127,8 @@ if __name__ == '__main__':
             if name == "omega_f":
                 nominal = -(config.avant_lr * data[:, 5] + data[:, 6] * np.sin(data[:, 3])) / (config.avant_lf * np.cos(data[:, 3]) + config.avant_lr)
             elif name == "v_f":
-                nominal = 3.5*data[:, 8]
-            elif name in ["dot_beta", "dot_dot_beta"]:
+                nominal = 3*data[:, 8]
+            elif name in ["dot_beta", "dot_dot_beta", "u_steer"]:
                 a = 0.127 # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
                 b = 0.495 # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
                 eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
@@ -131,6 +139,10 @@ if __name__ == '__main__':
                     nominal = data[:, 11] / k
                 elif name == "dot_dot_beta":
                     nominal = (data[:, 14] * k) / k**2
+                elif name == "u_steer":
+                    nominal = k * data[:, 12]
+            elif name == "u_gas":
+                nominal = data[:, 6] / 3
             mean += nominal
 
             fig, ax = plt.subplots(1, figsize=(2000 / 100, 1000 / 100))

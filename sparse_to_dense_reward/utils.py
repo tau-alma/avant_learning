@@ -86,7 +86,7 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         self.extractors = nn.ModuleDict(extractors)
 
         # Update the features dim manually
-        self._features_dim = 9 #64 # total_concat_size
+        self._features_dim = 9 #+ 5*2 #64 # total_concat_size
 
     def forward(self, observations: TensorDict) -> torch.Tensor:
         achieved = self.extractors["achieved_goal"](observations["achieved_goal"])

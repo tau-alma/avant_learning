@@ -7,7 +7,7 @@ from typing import List
 
 
 class AcadosSolver:
-    def __init__(self, problem: SymbolicMPCProblem):
+    def __init__(self, problem: SymbolicMPCProblem, rebuild: bool=False):
         self.problem = problem
 
         self.N = problem.N
@@ -78,14 +78,18 @@ class AcadosSolver:
         self.ocp.constraints.idxbu = np.arange(problem.ocp_u.size()[0])
 
         # Nonlinear constraints:
-        if problem.g_fun is not None:
-            self.ocp.model.con_h_expr = problem.g_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
-            self.ocp.constraints.idxsh = np.arange(0)
         nonlinear_slack_weights = np.array([])
+        nonlinear_slack_weights_e = np.array([])
+        if problem.g_fun is not None:
+            self.ocp.constraints.lh = problem.lbg_vec
+            self.ocp.constraints.uh = problem.ubg_vec
+            self.ocp.model.con_h_expr = problem.g_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
+            self.ocp.constraints.idxsh = np.array([*list(problem.ocp_g_slacks.keys())])
+            nonlinear_slack_weights = np.array([*list(problem.ocp_g_slacks.values())])
         if problem.terminal_g_fun is not None:
             self.ocp.model.con_h_expr_e = problem.terminal_g_fun(problem.ocp_x, problem.ocp_p)
             self.ocp.constraints.idxsh_e = np.arange(0)
-        nonlinear_slack_weights_e = np.array([])
+            nonlinear_slack_weights_e = np.array([])
 
         # Slack penalties:
         self.ocp.cost.zl =   np.r_[state_slack_weights, nonlinear_slack_weights]
@@ -134,7 +138,7 @@ class AcadosSolver:
 
         # Solver settings:
         self.ocp.solver_options.nlp_solver_type = "SQP_RTI"
-        self.ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
+        self.ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
         self.ocp.solver_options.regularize_method = "PROJECT"
         self.ocp.solver_options.tol = 1e-5
         self.ocp.solver_options.print_level = 0
@@ -150,8 +154,8 @@ class AcadosSolver:
             self.ocp.solver_options.hessian_approx = "EXACT"
         else:
             self.ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
-        self.ocp.solver_options.levenberg_marquardt = 1e-4
-        # self.ocp.solver_options.nlp_solver_step_length = 0.75
+        self.ocp.solver_options.levenberg_marquardt = 1e-2
+        self.ocp.solver_options.nlp_solver_step_length = 0.75
 
         self.acados_solver = AcadosOcpSolver(self.ocp, json_file="acados_ocp.json")
 

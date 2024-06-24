@@ -53,11 +53,12 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         l_achieved, l_desired = self._compute_goals(self.dynamics.lbx.unsqueeze(0))
         u_achieved, u_desired = self._compute_goals(self.dynamics.ubx.unsqueeze(0))
 
+        tmp_o = torch.ones([1, num_obstacles, 3], dtype=torch.float32).to(device)
         self.single_observation_space = spaces.Dict(
             dict(
                 observation=spaces.Box(
-                    low=self._observe(self.dynamics.lbx.unsqueeze(0)).flatten(),
-                    high=self._observe(self.dynamics.ubx.unsqueeze(0)).flatten(),
+                    low=self._observe(self.dynamics.lbx.unsqueeze(0), -2*np.inf * tmp_o).flatten(),
+                    high=self._observe(self.dynamics.ubx.unsqueeze(0), 2*np.inf * tmp_o).flatten(),
                     dtype=np.float32
                 ),
                 achieved_goal=spaces.Box(
@@ -129,12 +130,25 @@ class AvantGoalEnv(VecEnv, GoalEnv):
 
         super(AvantGoalEnv, self).__init__(num_envs=num_envs, observation_space=self.single_observation_space, action_space=self.single_action_space)
 
-    def _observe(self, states: torch.Tensor) -> np.ndarray:
+    def _observe(self, states: torch.Tensor, obstacles: torch.Tensor) -> np.ndarray:
         betas = states[:, self.dynamics.beta_idx, None].cpu().numpy()
         dot_betas = states[:, self.dynamics.dot_beta_idx, None].cpu().numpy()
         velocities = states[:, self.dynamics.v_f_idx, None].cpu().numpy()
 
-        return np.c_[betas, dot_betas, velocities]
+        if self.num_obstacles == 0:
+            return np.c_[betas, dot_betas, velocities]
+        else:
+            x_f = states[:, self.dynamics.x_f_idx]
+            y_f = states[:, self.dynamics.y_f_idx]
+            x_o = obstacles[:, :, 0]
+            y_o = obstacles[:, :, 1]
+            r_o = obstacles[:, :, 2]
+            d_x = x_o - x_f[:, None]
+            d_y = y_o - y_f[:, None]
+            d_x_border = d_x - torch.sign(d_x) * r_o
+            d_y_border = d_y - torch.sign(d_y) * r_o
+
+            return np.c_[betas, dot_betas, velocities, d_x_border.cpu().numpy(), d_y_border.cpu().numpy()]
     
     def _compute_goals(self, states: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
         x_f = states[:, self.dynamics.x_f_idx].cpu().numpy()
@@ -162,10 +176,10 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         obs = {
             "achieved_goal": achieved_goals,
             "desired_goal": desired_goals,
-            "observation": self._observe(states)
+            "observation": self._observe(states, self.obstacles)
         }
         if not tmp:
-            obs["occupancy_grid"] = np.zeros((self.num_envs, 64), dtype=np.float32)#create_occupancy_grids(self.obstacles, cell_size=0.078, axis_limit=2*POSITION_BOUND, encoder=self.encoder)
+            obs["occupancy_grid"] = np.zeros((self.num_envs, 64), dtype=np.float32) # create_occupancy_grids(self.obstacles, cell_size=0.078, axis_limit=2*POSITION_BOUND, encoder=self.encoder)
         return obs
 
     def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict]) -> float:
@@ -177,9 +191,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         sin_c_d, cos_c_d = desired_goal[:, 2], desired_goal[:, 3]
 
         beta = achieved_goal[:, 4]
-        v_f = achieved_goal[:, 5]
-        dot_beta = achieved_goal[:, 6]
-        standstill_dot_beta_penalty = np.abs(dot_beta) * (1 - np.minimum(np.abs(v_f) / 0.25, 1)) * 0.1 # nonzero dot_beta when standing still is bad
+        desired_beta = desired_goal[:, 4]
 
         # TODO: append a pallet obstacle and handle this with the other obstacles:
         # cx = cx + cos_c_d*(PALLET_OFFSET + PALET_RADIUS)
@@ -190,14 +202,40 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         achieved_hdg = np.arctan2(sin_c_a, cos_c_a)
         desired_hdg = np.arctan2(sin_c_d, cos_c_d)
         hdg_error_deg = 180/np.pi * np.arctan2(np.sin(achieved_hdg - desired_hdg), np.cos(achieved_hdg - desired_hdg))
+        beta_error_deg = 180/np.pi * np.arctan2(np.sin(beta - desired_beta), np.cos(beta - desired_beta))
         reward = np.where(
             (np.sqrt(np.sum((achieved_goal[:, :2] - desired_goal[:, :2])**2, axis=1)) < 0.1) &
-            (hdg_error_deg < 5)
+            (np.abs(hdg_error_deg) < 5) &
+            (np.abs(beta_error_deg) < 5)
             , torch.zeros(len(achieved_goal))
             , -torch.ones(len(achieved_goal))
         )
 
-        return reward - standstill_dot_beta_penalty # - pallet_penalty
+        return reward
+    
+    def _compute_penalties(self):
+        obstacle_penalty = 0
+        if self.num_obstacles > 0:
+            x_f = self.states[:, self.dynamics.x_f_idx]
+            y_f = self.states[:, self.dynamics.y_f_idx]
+            theta_f = self.states[:, self.dynamics.theta_f_idx]
+            beta = self.states[:, self.dynamics.beta_idx]
+
+            x_o = self.obstacles[:, :, 0]
+            y_o = self.obstacles[:, :, 1]
+            r_o = self.obstacles[:, :, 2]
+
+            # Front link collision check:
+            dist_f = torch.sqrt((x_f[:, None] - x_o)**2 + (y_f[:, None] - y_o)**2)
+            obstacle_penalty_f = torch.where(torch.any(dist_f < r_o + MACHINE_RADIUS, axis=1), -100 * torch.ones(x_f.shape[0]).to(self.device), torch.zeros(x_f.shape[0]).to(self.device))
+            # Rear link collision check: (TODO: should probably be computed exactly like the visual bounding circle)
+            x_r = x_f - HALF_MACHINE_LENGTH/2 * torch.cos(theta_f) - HALF_MACHINE_LENGTH/2 * torch.cos(theta_f + beta) # (cos_beta * cos_c_a - sin_beta * sin_c_a)  # cos(a+b) = cos a * cos b - sin a * sin b
+            y_r = y_f - HALF_MACHINE_LENGTH/2 * torch.sin(theta_f) - HALF_MACHINE_LENGTH/2 * torch.sin(theta_f + beta) # (sin_beta * cos_c_a + cos_beta * sin_c_a)  # sin(a+b) = sin a * cos b - cos a * sin b
+            dist_r = torch.sqrt((x_r[:, None] - x_o)**2 + (y_r[:, None] - y_o)**2)
+            obstacle_penalty_r = torch.where(torch.any(dist_r < r_o + MACHINE_RADIUS, axis=1), -100 * torch.ones(x_f.shape[0]).to(self.device), torch.zeros(x_f.shape[0]).to(self.device))
+            obstacle_penalty = obstacle_penalty_f + obstacle_penalty_r
+
+        return obstacle_penalty.cpu().numpy()
     
     def _simulate_lidar(self):
         origins = self.states[:, :2].cpu().numpy()
@@ -220,7 +258,10 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         tmp_obs = self._construct_observation(self.states, self.obstacles)
         reward = self.compute_reward(tmp_obs["achieved_goal"], tmp_obs["desired_goal"], info)
 
-        terminated = torch.from_numpy(reward > self.reward_target).to(self.states.device)
+        if self.num_obstacles > 0:
+            reward += self._compute_penalties()
+
+        terminated = torch.from_numpy((reward > self.reward_target) | (reward <= -100)).to(self.states.device)
         truncated = (self.num_steps > self.time_limit_s / self.dynamics.dt)
         done = terminated | truncated
 

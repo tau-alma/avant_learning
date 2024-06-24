@@ -35,6 +35,7 @@ class SymbolicMPCProblem:
     lbg_vec: np.ndarray | None = None
     ubg_vec: np.ndarray | None = None
     g_fun: cs.Function | None = None
+    ocp_g_slacks: Dict[int, float] | None = None
     
     # Terminal cost
     terminal_cost_fun: cs.Function | None = None
