@@ -86,13 +86,12 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         self.extractors = nn.ModuleDict(extractors)
 
         # Update the features dim manually
-        self._features_dim = 9 #+ 5*2 #64 # total_concat_size
+        self._features_dim = 9
 
     def forward(self, observations: TensorDict) -> torch.Tensor:
         achieved = self.extractors["achieved_goal"](observations["achieved_goal"])
         desired = self.extractors["desired_goal"](observations["desired_goal"])
         obs = self.extractors["observation"](observations["observation"])
-        z = self.extractors["occupancy_grid"](observations["occupancy_grid"])
 
         pos_residual = desired[:, :2] - achieved[:, :2]
         achieved_hdg_data = achieved[:, 2:4]
@@ -103,7 +102,6 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         try:
             retval = torch.cat(encoded_tensor_list, dim=1)
         except:
-            print(observations["occupancy_grid"].shape)
             for t in encoded_tensor_list:
                 print(t.shape)
             raise RuntimeError("noped out")
@@ -130,80 +128,3 @@ def rotate_image(image, angle, p_rot):
     center_of_rotated = rotated_large_surface.get_rect().center
     
     return rotated_large_surface, center_of_rotated
-
-def create_occupancy_grids(obstacles, cell_size, axis_limit, encoder):
-    device = obstacles.device
-    
-    # Calculate grid size based on the axis limits and cell size
-    grid_size = int((2 * axis_limit) / cell_size)
-
-    # The input is expected to be in the range [-axis_limit, axis_limit]
-    # We transform it to [0, 1] range for computation
-    normalized_obstacles = (obstacles[:, :, :2] + axis_limit) / (2 * axis_limit)
-    normalized_radii = obstacles[:, :, 2] / (2 * axis_limit)
-
-    N, K, _ = obstacles.shape
-    occupancy_grids = torch.zeros((N, grid_size, grid_size), dtype=torch.bool, device=device)
-
-    # Generate coordinates for the centers of each grid cell in the normalized range
-    coords = torch.linspace(0, 1, grid_size, device=device)
-    x_grid, y_grid = torch.meshgrid(coords, coords, indexing='ij')
-
-    # Compute the occupancy grids
-    for i in range(N):
-        for j in range(K):
-            # Obstacle center and radius in normalized coordinates
-            x, y = normalized_obstacles[i, j]
-            r = normalized_radii[i, j]
-            # Compute squared distance from each grid cell center to the obstacle center
-            distance_squared = (x_grid - x)**2 + (y_grid - y)**2
-
-            # Update the occupancy grid: mark as occupied if within the normalized radius
-            occupancy_grids[i] |= (distance_squared <= r**2)
-    
-    occupancy_grids = occupancy_grids.unsqueeze(1).to(torch.float32)
-    if encoder is not None:
-        occupancy_grids = encoder.encode(occupancy_grids)[0]
-
-    return occupancy_grids.to('cpu').numpy().astype(np.float32)
-
-def precompute_lidar_direction_vectors(num_rays, max_distance):
-    angles = np.linspace(0, 2 * np.pi, num_rays)
-    direction_vectors = np.array([np.cos(angles), np.sin(angles)]).T * max_distance
-    return angles, direction_vectors
-
-def circle_ray_intersection(ray_origin, ray_direction, circle_center, radius):
-    """Calculate intersection of ray with a circle."""
-    f = ray_origin - circle_center
-    a = np.dot(ray_direction, ray_direction)
-    b = 2 * np.dot(f, ray_direction)
-    c = np.dot(f, f) - radius ** 2
-    discriminant = b**2 - 4 * a * c
-    if discriminant >= 0:
-        t1 = (-b - np.sqrt(discriminant)) / (2 * a)
-        t2 = (-b + np.sqrt(discriminant)) / (2 * a)
-        if t1 >= 0 and t2 >= 0:
-            return min(t1, t2)
-    return np.inf
-
-def simulate_lidar(origin, rtree_index, angles, direction_vectors):
-    distances = []
-    for dir_vector in direction_vectors:
-        end_point = origin + dir_vector
-        bbox = (min(origin[0], end_point[0]), min(origin[1], end_point[1]),
-                max(origin[0], end_point[0]), max(origin[1], end_point[1]))
-        nearest_distance = np.linalg.norm(dir_vector)
-        for idx in rtree_index.intersection(bbox, objects='raw'):
-            obstacle_center = np.array(idx[:-1])
-            obstacle_radius = idx[-1]
-            distance = circle_ray_intersection(origin, dir_vector / np.linalg.norm(dir_vector), obstacle_center, obstacle_radius)
-            if distance != np.inf and distance < nearest_distance:
-                nearest_distance = distance
-        distances.append(nearest_distance)
-    distances = np.asarray(distances)
-
-    points = np.zeros((len(distances), 2))
-    points[:, 0] = origin[0] + np.cos(angles)*distances
-    points[:, 1] = origin[1] + np.sin(angles)*distances
-
-    return points
