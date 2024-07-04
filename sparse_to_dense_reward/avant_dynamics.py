@@ -51,7 +51,7 @@ class AvantDynamics:
             for name in ["omega_f", "v_f", "dot_beta"]:
                 data_x = torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_inputs.pth").to(device)
                 data_y = torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_targets.pth").to(device)
-                gp = GPModel(data_x, data_y, train_epochs=0).to(device)
+                gp = GPModel(data_x, data_y, train_epochs=0, device=device).to(device)
                 gp.load_state_dict(torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_model.pth"))
                 self.gp_dict[name] = gp
 
@@ -128,7 +128,7 @@ class AvantDynamics:
         return clamped_next_state
 
     def _mpc_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
-        
+
         def continuous_dynamics(x_values: torch.Tensor, u_values: torch.Tensor):
             u_values = self.control_scalers * u_values
 
