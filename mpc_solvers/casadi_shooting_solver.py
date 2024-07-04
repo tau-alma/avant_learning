@@ -120,7 +120,7 @@ class CasadiShootingSolver:
         # Create an NLP solver
         prob = {'f': J, 'x': w, 'g': g, 'p': p}
         hessian_mode = "exact" if problem._l4c_model is not None else "gauss-newton"
-        opts = {}#{'qpsol': 'osqp'}#, 'hessian_approximation': hessian_mode}
+        opts = {'qpsol': 'osqp'}#, 'hessian_approximation': hessian_mode}
         opts = {'ipopt.max_iter': 100, 'ipopt.print_level': 0}
         self.solver = nlpsol('solver', 'ipopt', prob, opts)
         

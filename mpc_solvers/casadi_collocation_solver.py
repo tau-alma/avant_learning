@@ -16,7 +16,6 @@ class CasadiCollocationSolver:
         self.n_x = problem.ocp_x.size1()
         self.n_u = problem.ocp_u.size1()
         self.n_p = problem.ocp_p.size1()
-        self.n_t_p = problem.terminal_ocp_p.size1()
         self.n_terminal_cost_p = problem.terminal_cost_params.size1() if problem.terminal_cost_params is not None else 0
 
         # Degree of interpolating polynomial
@@ -137,7 +136,7 @@ class CasadiCollocationSolver:
 
         if problem.terminal_cost_fun is not None:
             # New NLP parameter for terminal stage
-            Pk = MX.sym("P_" + str(k+1), self.n_t_p)
+            Pk = MX.sym("P_" + str(k+1), self.n_p)
             p.append(Pk)
             if problem.ocp_x_to_terminal_state_fun is not None:
                 neural_cost_inputs = problem.ocp_x_to_terminal_state_fun(Xk, Pk)

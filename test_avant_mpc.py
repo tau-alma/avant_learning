@@ -13,10 +13,9 @@ from mpc_solvers.acados_solver import AcadosSolver
 from utils import MLP
 
 class MPCActor:
-    def __init__(self, solver_class, linearize=False):
-        self.history = []
+    def __init__(self, solver_class):
         super().__init__()
-
+        self.history = []
         fake_inf = 1e7
         
         # States
@@ -53,10 +52,9 @@ class MPCActor:
         x_goal = cs.MX.sym("x_goal")
         y_goal = cs.MX.sym("y_goal")
         theta_goal = cs.MX.sym("y_goal")
-        t = cs.MX.sym("t")
-        #ocp_p = cs.vertcat(x_goal, y_goal, theta_goal, t)
-        ocp_p = cs.vertcat(t)
-        terminal_ocp_p = cs.vertcat(x_goal, y_goal, theta_goal)
+        policy_dot_beta = cs.MX.sym("policy_dot_beta")
+        policy_v_f = cs.MX.sym("policy_v_f")
+        ocp_p = cs.vertcat(x_goal, y_goal, theta_goal, policy_dot_beta, policy_v_f)
 
         # Continuous dynamics:
         omega_f = -(
@@ -73,22 +71,13 @@ class MPCActor:
         )
         f = cs.Function('f', [ocp_x, ocp_u, ocp_p], [f_expr])
 
-        # Stage cost:
-        l = cs.Function('l', [ocp_x, ocp_u, ocp_p], [(dot_dot_beta/config.avant_max_dot_dot_beta)**2 + (a_f/config.avant_max_a)**2])  
-
-        # For empirical cost experiments:
-        goal_heading = (90 * (1 - cs.cos(theta_goal - theta_f)) )**2
-        goal_scaled_dist = (1e1*(x_f - x_goal))**2 + (1e1*(y_f - y_goal))**2
-        # l  = cs.Function('l', [ocp_x, ocp_u, ocp_p], [t*(dot_dot_beta**2 + a**2 + v**2)])           
-        # l_t = cs.Function('l_t', [ocp_x, terminal_ocp_p], [goal_scaled_dist + goal_heading])
-
-        g = cs.Function('g', [ocp_x, ocp_u, ocp_p], [ ((1 - cs.tanh(v_f_ref/0.125)) * dot_beta_ref)**2 ])
-        lbg = np.array([-fake_inf])
-        ubg = np.array([0])
-        ocp_g_slacks = {0: 100}
+        accel_penalty = 1e-2*dot_dot_beta**2 + 1e-2*a_f**2
+        policy_deviation = (dot_beta_ref - policy_dot_beta)**2 + (v_f_ref - policy_v_f)**2
+        standstill_turning_penalty = (1 - cs.tanh(v_f_ref**2 / 0.15)) * (45/cs.pi * dot_beta_ref)**2
+        l = cs.Function('l', [ocp_x, ocp_u, ocp_p], [accel_penalty + standstill_turning_penalty])
 
         problem = SymbolicMPCProblem(
-            N=20,
+            N=10,
             h=0.2,
             ocp_x=ocp_x,
             lbx_vec=lbx_vec,
@@ -98,29 +87,41 @@ class MPCActor:
             lbu_vec=lbu_vec,
             ubu_vec=ubu_vec,
             ocp_p=ocp_p,
-            terminal_ocp_p=terminal_ocp_p,
             dynamics_fun=f, 
-            cost_fun=l,
-            # g_fun=g,
-            # lbg_vec=lbg,
-            # ubg_vec=ubg,
-            # ocp_g_slacks=ocp_g_slacks
-            #terminal_cost_fun=l_t
+            stage_cost_fun=l
         )
  
         # Terminal cost with Q network:
-        neural_cost_state = cs.vertcat(x_goal - x_f,       y_goal - y_f,    
-                                       cs.sin(theta_f),    cs.cos(theta_f), 
-                                       cs.sin(theta_goal), cs.cos(theta_goal), 
-                                       beta, dot_beta_ref, v_f_ref, 
-                                       dot_beta_ref, v_f_ref)
-        model = torch.load("avant_critic").eval()
-        problem.add_terminal_neural_cost(model=model, model_state=neural_cost_state, linearize=linearize)
+        critic_state = cs.vertcat(
+            x_goal - x_f,       y_goal - y_f,    
+            cs.sin(theta_f),    cs.cos(theta_f), 
+            cs.sin(theta_goal), cs.cos(theta_goal), 
+            beta, dot_beta_ref, v_f_ref, 
+            dot_beta_ref,       v_f_ref
+        )
+        critic_model = torch.load("avant_critic").eval()
+        problem.add_stage_neural_cost(model=critic_model, model_state=critic_state)
+        problem.add_terminal_neural_cost(model=critic_model, model_state=critic_state)
+
+        # Reference targets with policy:
+        policy_model = MLP(9, [18, 36, 72, 36, 18], 2).eval()
+        policy_model.load_state_dict(torch.load("avant_actor"))
+        actor_state = critic_state[:-2]
+        sim_x = cs.vertcat(x_f, y_f, theta_f, beta)
+        sim_u = cs.vertcat(dot_beta_ref, v_f_ref)
+        sim_f_expr = cs.vertcat(
+            v_f_ref * cs.cos(theta_f),
+            v_f_ref * cs.sin(theta_f),
+            omega_f,
+            dot_beta_ref
+        )
+        f_s = cs.Function("sim_fun", [sim_x, sim_u], [sim_f_expr])
+        # problem.add_neural_policy(model=policy_model, model_state=actor_state, sim_fun=f_s)
 
         self.solver = solver_class(problem, rebuild=True)
-    
+
     def reset(self):
-        pass
+        pass            
 
     def act(self, observation) -> np.ndarray:
         obs = observation["observation"][0][:3]
@@ -128,11 +129,10 @@ class MPCActor:
         achieved_goal = np.r_[achieved_goal[:2], np.arctan2(achieved_goal[2], achieved_goal[3])]
         obs = np.r_[achieved_goal, obs]
 
+        # Extract x, y, theta:
         desired_goal = observation["desired_goal"][0]
         desired_goal = np.r_[desired_goal[:2], np.arctan2(desired_goal[2], desired_goal[3])]
-        params = [np.empty(0) for _ in range(self.solver.N + 1)]
-        params = [np.r_[j*0.2/(self.solver.N*0.2)] for j in range(self.solver.N + 1)]
-        params[-1] = desired_goal
+        params = [desired_goal for _ in range(self.solver.N + 1)]
         
         t1 = time.time_ns()
         sol_x, sol_u, sol = self.solver.solve(obs, params)
@@ -155,8 +155,6 @@ class MPCActor:
 class RLActor:
     def __init__(self):
         self.network = torch.load("avant_actor_full").eval()
-        #self.network = MLP(9, [256]*3, 2)
-        # self.network.load_state_dict(torch.load("avant_actor"))
         self.beta_vel = 0
         self.vel_f = 0
 
@@ -170,18 +168,6 @@ class RLActor:
             policy_outputs = self.network(torch_state)[0]
         policy_outputs = policy_outputs.cpu().numpy()
 
-        # obs = observation["observation"][0]
-        # achieved = observation["achieved_goal"][0]
-        # desired = observation["desired_goal"][0]
-        # policy_inputs = torch.tensor([
-        #     desired[0] - achieved[0], desired[1] - achieved[1],
-        #     achieved[2], achieved[3],
-        #     desired[2], desired[3],
-        #     obs[0], obs[1], obs[1]
-        # ]).unsqueeze(0)
-        # with torch.no_grad():
-        #     policy_outputs = self.network(policy_inputs).numpy()[0]
-
         # Rate limit the change of beta velocity target command by max allowed acceleration:
         new_beta_vel = max(
             min(
@@ -190,7 +176,6 @@ class RLActor:
             ),
             self.beta_vel - 0.1 * config.avant_max_dot_dot_beta
         )
-        beta_accel = (new_beta_vel - self.beta_vel) / 0.1
         self.beta_vel = new_beta_vel
 
         # Rate limit the change of linear velocity target command by max allowed acceleration:
@@ -209,14 +194,13 @@ class RLActor:
         eps = eps0 - obs[0]
         k = 10 * a * b * np.sin(eps) / np.sqrt(a**2 + b**2 - 2*a*b*np.cos(eps))
 
-        env_controls = np.r_[k * self.beta_vel, k * beta_accel, self.vel_f/3]
+        env_controls = np.r_[k * self.beta_vel, self.vel_f/3]
         
         return env_controls, np.empty(0)
 
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--solver")
-    parser.add_argument("--linearize", action="store_true")
     parser.add_argument("--rl", action="store_true")
     args = parser.parse_args()
 
@@ -229,12 +213,12 @@ if __name__ == "__main__":
             solver_class = AcadosSolver
         else:
             raise ValueError(f"Unknown solver {args.solver}")
-        actor = MPCActor(solver_class=solver_class, linearize=args.linearize)
+        actor = MPCActor(solver_class=solver_class)
     else:
         actor = RLActor()
 
     # Initialize environment and actor
-    env = AvantGoalEnv(num_envs=1, dt=0.1, time_limit_s=30, device='cpu', num_obstacles=0, eval=True)
+    env = AvantGoalEnv(num_envs=1, dt=0.1, time_limit_s=30, device='cpu', eval=True)
     screen = pygame.display.set_mode([env.RENDER_RESOLUTION, env.RENDER_RESOLUTION])
 
     # Frame rate and corresponding real-time frame duration

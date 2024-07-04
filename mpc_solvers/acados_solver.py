@@ -1,6 +1,8 @@
 import numpy as np
 import casadi as cs
 import scipy
+import torch
+import config
 from acados_template import AcadosOcp, AcadosOcpSolver
 from mpc_solvers.mpc_problem import SymbolicMPCProblem
 from typing import List
@@ -18,7 +20,6 @@ class AcadosSolver:
         self.n_controls = 0
         self.n_states = 0
         self.n_params = 0
-        self.n_param_pad = 0
         self.n_terminal_param_pad = 0
         
         self.ocp = None
@@ -40,13 +41,10 @@ class AcadosSolver:
         self.ocp.model.u = problem.ocp_u
         # Parameters
         params = problem.ocp_p
-        self.n_terminal_param_pad += problem.ocp_p.size1()
-        if problem.terminal_ocp_p is not None:
-            params = cs.vertcat(params, problem.terminal_ocp_p)
-            self.n_param_pad += problem.terminal_ocp_p.size1()
-        if problem.terminal_cost_params is not None:
-            params = cs.vertcat(params, problem.terminal_cost_params)
-            self.n_param_pad += problem.terminal_cost_params.size1()
+
+        if problem.has_stage_neural_cost:
+            params = cs.vertcat(params, problem.stage_cost_params)
+            self.n_terminal_param_pad += problem.stage_cost_params.size1()
         self.ocp.model.p = params
 
         self.ocp.model.f_expl_expr = problem.dynamics_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
@@ -102,25 +100,27 @@ class AcadosSolver:
         self.ocp.cost.Zu_e = np.r_[state_slack_weights, nonlinear_slack_weights_e]
 
         # Stage cost:
-        self.ocp.cost.cost_type = 'NONLINEAR_LS'
-        self.ocp.model.cost_y_expr = problem.cost_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
-        self.ocp.cost.yref = np.zeros(self.ocp.model.cost_y_expr.size1()) 
-        self.ocp.cost.W = scipy.linalg.block_diag(*[0] * self.ocp.model.cost_y_expr.size1())
+        if problem.has_stage_neural_cost:
+            self.ocp.cost.cost_type = 'EXTERNAL'
+            neural_cost_state = problem.ocp_x_to_stage_state_fun(problem.ocp_x, problem.ocp_p)
+            self.ocp.model.cost_expr_ext_cost = problem.stage_cost_fun(neural_cost_state, problem.ocp_x, problem.ocp_u, problem.stage_cost_params, problem.ocp_p)
+        else:
+            self.ocp.cost.cost_type = 'NONLINEAR_LS'
+            self.ocp.model.cost_y_expr = problem.stage_cost_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
+            self.ocp.cost.yref = np.zeros(self.ocp.model.cost_y_expr.size1()) 
+            self.ocp.cost.W = scipy.linalg.block_diag(*[1] * self.ocp.model.cost_y_expr.size1())
 
         # Terminal cost
         if problem.terminal_cost_fun is not None:
-            if problem.has_neural_cost:
+            if problem.has_terminal_neural_cost:
                 self.ocp.cost.cost_type_e = 'EXTERNAL'
-                neural_cost_state = problem.ocp_x_to_terminal_state_fun(problem.ocp_x, problem.terminal_ocp_p)
-                if problem.terminal_cost_params is not None:
-                    self.ocp.model.cost_expr_ext_cost_e = problem.terminal_cost_fun(neural_cost_state, problem.terminal_cost_params, problem.terminal_ocp_p)
-                else:
-                    self.ocp.model.cost_expr_ext_cost_e = problem.terminal_cost_fun(neural_cost_state, problem.terminal_ocp_p)
+                neural_cost_state = problem.ocp_x_to_terminal_state_fun(problem.ocp_x, problem.ocp_p)
+                self.ocp.model.cost_expr_ext_cost_e = problem.terminal_cost_fun(neural_cost_state, problem.ocp_p)
             else:
                 self.ocp.cost.cost_type_e = 'NONLINEAR_LS'
                 self.ocp.model.cost_y_expr_e = problem.terminal_cost_fun(problem.ocp_x, problem.ocp_p)
                 self.ocp.cost.yref_e = np.zeros(self.ocp.model.cost_y_expr_e.size1()) 
-                self.ocp.cost.W_e = scipy.linalg.block_diag(*[0] * self.ocp.model.cost_y_expr_e.size1())
+                self.ocp.cost.W_e = scipy.linalg.block_diag(*[1] * self.ocp.model.cost_y_expr_e.size1())
         
         # Initialize initial conditions:
         self.n_states = self.ocp.model.x.size()[0]
@@ -138,24 +138,24 @@ class AcadosSolver:
 
         # Solver settings:
         self.ocp.solver_options.nlp_solver_type = "SQP_RTI"
-        self.ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
+        self.ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
         self.ocp.solver_options.regularize_method = "PROJECT"
         self.ocp.solver_options.tol = 1e-5
         self.ocp.solver_options.print_level = 0
 
-        self.ocp.solver_options.qp_solver_iter_max = 200
+        self.ocp.solver_options.qp_solver_iter_max = 250
         self.ocp.qp_solver_warm_start = 2
         self.ocp.solver_options.hpipm_mode = 'SPEED'
-        if problem.model_external_shared_lib_dir is not None and problem.model_external_shared_lib_name is not None:
-            self.ocp.solver_options.model_external_shared_lib_dir = problem.model_external_shared_lib_dir
-            self.ocp.solver_options.model_external_shared_lib_name = problem.model_external_shared_lib_name + ' -l' + problem.model_external_shared_lib_name
+        if problem.terminal_model_external_shared_lib_dir is not None and problem.terminal_model_external_shared_lib_name is not None:
+            self.ocp.solver_options.model_external_shared_lib_dir = problem.terminal_model_external_shared_lib_dir
+            self.ocp.solver_options.model_external_shared_lib_name = problem.terminal_model_external_shared_lib_name + ' -l' + problem.terminal_model_external_shared_lib_name
         
-        if problem.has_neural_cost:
+        if problem.has_stage_neural_cost or problem.has_terminal_neural_cost:
             self.ocp.solver_options.hessian_approx = "EXACT"
         else:
             self.ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
-        self.ocp.solver_options.levenberg_marquardt = 1e-2
-        self.ocp.solver_options.nlp_solver_step_length = 0.75
+        self.ocp.solver_options.levenberg_marquardt = 1e-4
+        # self.ocp.solver_options.nlp_solver_step_length = 0.5
 
         self.acados_solver = AcadosOcpSolver(self.ocp, json_file="acados_ocp.json")
 
@@ -167,19 +167,73 @@ class AcadosSolver:
         self.acados_solver.set(0, "lbx", x_initial)
         self.acados_solver.set(0, "ubx", x_initial)
 
-        if self.problem.get_terminal_cost_params_fun is not None:
-            terminal_cost_input = self.problem.ocp_x_to_terminal_state_fun(self.xstar[-1, :], params[-1]).full().T
-            terminal_cost_params = self.problem.get_terminal_cost_params_fun(terminal_cost_input)[0]
-            params[-1] = np.r_[params[-1], terminal_cost_params]
+        if not self.initialized:
+            self.xstar[:] = x_initial
+            self.ustar = np.zeros_like(self.ustar)
+        else:
+            self.xstar[0] = x_initial
+
+        # Prepare reference target using policy:
+        if self.problem.policy is not None:
+            reference_targets = []
+            state_targets = []
+            running_targets = x_initial[-2:]
+            running_state = x_initial[:-2]
+            for n in range(0, self.N+1):
+                padded_params = np.r_[params[n], np.zeros(2)]
+                full_state = np.r_[running_state, running_targets]
+                policy_input = self.problem.ocp_x_to_policy_state_fun(full_state, padded_params).full()
+                policy_input = torch.from_numpy(policy_input).T.to(torch.float32)
+                with torch.no_grad():
+                    targets = self.problem.policy(policy_input).numpy()[0] * [config.avant_max_dot_beta, config.avant_max_v]
+
+                # Rate limit the change of beta velocity target command by max allowed acceleration:
+                new_beta_vel = max(
+                    min(
+                        targets[0] * config.avant_max_dot_beta,
+                        running_targets[0] + self.problem.h * config.avant_max_dot_dot_beta
+                    ),
+                    running_targets[0] - self.problem.h * config.avant_max_dot_dot_beta
+                )
+                targets[0] = new_beta_vel
+
+                # Rate limit the change of linear velocity target command by max allowed acceleration:
+                new_vel_f = max(
+                    min(
+                        targets[1] * config.avant_max_v,
+                        running_targets[1] + self.problem.h * config.avant_max_a
+                    ),
+                    running_targets[1] - self.problem.h * config.avant_max_a
+                )
+                targets[1] = new_vel_f
+
+                running_targets = targets
+                running_state = running_state + self.problem.h * self.problem.sim_fun(running_state, targets).full().T[0]
+                reference_targets.append(targets)
+                state_targets.append(running_state)
+            reference_targets = np.asarray(reference_targets)
+            state_targets = np.c_[np.asarray(state_targets), reference_targets]
+        else:
+            reference_targets = np.zeros((self.N+1, 2))
+
+        params = np.c_[params, reference_targets]
+        stage_params = np.asarray(params[:-1])
+        terminal_params = np.asarray(params[-1])
+
+        # Prepare stage cost linearization params:
+        if self.problem.get_stage_cost_params_fun is not None:
+            stage_cost_input = self.problem.ocp_x_to_stage_state_fun.map(self.N)(self.xstar[:-1, :].T, stage_params.T).full().T
+            stage_cost_params = self.problem.get_stage_cost_params_fun(stage_cost_input)
+            stage_params = np.c_[stage_params, stage_cost_params]
 
         # Fill in x0, u0 and p for the solver:
         for i in range(self.N + 1):
             self.acados_solver.set(i, "x", self.xstar[i])
             if i < self.N:
                 self.acados_solver.set(i, "u", self.ustar[i])
-                self.acados_solver.set(i, "p", np.r_[params[i], np.zeros(self.n_param_pad)])
+                self.acados_solver.set(i, "p", np.r_[stage_params[i]])
             else:
-                self.acados_solver.set(i, "p", np.r_[np.zeros(self.n_terminal_param_pad), params[i]])
+                self.acados_solver.set(i, "p", np.r_[terminal_params, np.zeros(self.n_terminal_param_pad)])
 
         for i in range(25):
             status = self.acados_solver.solve()
@@ -192,7 +246,8 @@ class AcadosSolver:
                 if i < self.N:
                     u = self.acados_solver.get(i, "u")
                     self.ustar[i] = u
-        else:
+        else:   # Probably infeasibility in underlying QP solver
+            self.initialized = False
             print("STATUS", status)
             print(self.acados_solver.get_cost())
             print(self.acados_solver.get_residuals())

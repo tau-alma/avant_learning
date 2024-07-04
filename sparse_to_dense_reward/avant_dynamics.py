@@ -126,70 +126,79 @@ class AvantDynamics:
         )
 
         return clamped_next_state
-    
+
     def _mpc_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
-        u_values = self.control_scalers * u_values
+        
+        def continuous_dynamics(x_values: torch.Tensor, u_values: torch.Tensor):
+            u_values = self.control_scalers * u_values
 
-        # To avoid accumulating beta even at the limits, we scale the dot_beta accordingly:
-        distance_to_limit = config.avant_max_beta - torch.abs(x_values[:, self.beta_idx])
-        scaling_factor = torch.min(distance_to_limit / (torch.abs(x_values[:, self.dot_beta_idx]) * self.dt + 1e-5), torch.tensor(1.0).to(x_values.device))
+            # To avoid accumulating beta even at the limits, we scale the dot_beta accordingly:
+            distance_to_limit = config.avant_max_beta - torch.abs(x_values[:, self.beta_idx])
+            scaling_factor = torch.min(distance_to_limit / (torch.abs(x_values[:, self.dot_beta_idx]) * self.dt + 1e-5), torch.tensor(1.0).to(x_values.device))
 
-        # Nominal and GP for omega_f
-        nominal_omega_f = -(
-            (config.avant_lr * scaling_factor * x_values[:, self.dot_beta_idx] + x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.beta_idx])) 
-            / (config.avant_lf * torch.cos(x_values[:, self.beta_idx]) + config.avant_lr)
-        )
-        gp_omega_f_inputs = torch.vstack([
-            x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], x_values[:, self.v_f_idx], u_values[:, self.u_steer_idx]
-        ]).T
-        gp_omega_f = self.gp_dict["omega_f"](gp_omega_f_inputs).mean
-        omega_f = nominal_omega_f + gp_omega_f
+            # Nominal and GP for omega_f
+            nominal_omega_f = -(
+                (config.avant_lr * scaling_factor * x_values[:, self.dot_beta_idx] + x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.beta_idx])) 
+                / (config.avant_lf * torch.cos(x_values[:, self.beta_idx]) + config.avant_lr)
+            )
+            gp_omega_f_inputs = torch.vstack([
+                x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], x_values[:, self.v_f_idx], u_values[:, self.u_steer_idx]
+            ]).T
+            gp_omega_f = self.gp_dict["omega_f"](gp_omega_f_inputs).mean
+            omega_f = nominal_omega_f + gp_omega_f
 
-        # Nominal and GP for v_f
-        nominal_v_f = 3 * u_values[:, self.u_throttle_idx]
-        gp_v_f_inputs = torch.vstack([
-            x_values[:, self.beta_idx], u_values[:, self.u_throttle_idx]
-        ]).T
-        gp_v_f = self.gp_dict["v_f"](gp_v_f_inputs).mean
-        v_f = nominal_v_f + gp_v_f
+            # Nominal and GP for v_f
+            nominal_v_f = 3 * u_values[:, self.u_throttle_idx]
+            gp_v_f_inputs = torch.vstack([
+                x_values[:, self.beta_idx], u_values[:, self.u_throttle_idx]
+            ]).T
+            gp_v_f = self.gp_dict["v_f"](gp_v_f_inputs).mean
+            v_f = nominal_v_f + gp_v_f
 
-        # Nominal and GP for dot_dot_beta        
-        a = 0.127                  # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
-        b = 0.495                  # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
-        eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
-        eps = eps0 - x_values[:, self.beta_idx]
-        k = 10 * a * b * np.sin(eps) / np.sqrt(a**2 + b**2 - 2*a*b*np.cos(eps))
-        nominal_dot_beta = u_values[:, self.u_steer_idx] / k
-        gp_dot_beta_inputs = torch.vstack([
-            x_values[:, self.beta_idx], x_values[:, self.v_f_idx], u_values[:, self.u_steer_idx]
-        ]).T
-        gp_dot_beta = self.gp_dict["dot_beta"](gp_dot_beta_inputs).mean
-        dot_beta = nominal_dot_beta + gp_dot_beta
+            # Nominal and GP for dot_dot_beta        
+            a = 0.127                  # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
+            b = 0.495                  # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
+            eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
+            eps = eps0 - x_values[:, self.beta_idx]
+            k = 10 * a * b * np.sin(eps) / np.sqrt(a**2 + b**2 - 2*a*b*np.cos(eps))
+            nominal_dot_beta = u_values[:, self.u_steer_idx] / k
+            gp_dot_beta_inputs = torch.vstack([
+                x_values[:, self.beta_idx], x_values[:, self.v_f_idx], u_values[:, self.u_steer_idx]
+            ]).T
+            gp_dot_beta = self.gp_dict["dot_beta"](gp_dot_beta_inputs).mean
+            dot_beta = nominal_dot_beta + gp_dot_beta
 
-        dot_state = torch.vstack([
-            v_f * torch.cos(x_values[:, self.theta_f_idx]),
-            v_f * torch.sin(x_values[:, self.theta_f_idx]),
-            omega_f,
-            x_values[:, self.dot_beta_idx],
-            (dot_beta - x_values[:, self.dot_beta_idx]) / self.dt,  # results in dot_beta after euler integration by dt
-            (v_f - x_values[:, self.v_f_idx]) / self.dt,            # results in v_f after euler integration by dt
-            # TODO: move these away from here:
-            torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal x
-            torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal y
-            torch.zeros(u_values.shape[0]).to(u_values.device)   # constant goal theta
-        ]).T
-        next_state = x_values + self.dt * dot_state
+            dot_state = torch.vstack([
+                v_f * torch.cos(x_values[:, self.theta_f_idx]),
+                v_f * torch.sin(x_values[:, self.theta_f_idx]),
+                omega_f,
+                x_values[:, self.dot_beta_idx],
+                (dot_beta - x_values[:, self.dot_beta_idx]) / self.dt,  # results in dot_beta after euler integration by dt
+                (v_f - x_values[:, self.v_f_idx]) / self.dt,            # results in v_f after euler integration by dt
+                # TODO: move these away from here:
+                torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal x
+                torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal y
+                torch.zeros(u_values.shape[0]).to(u_values.device)   # constant goal theta
+            ]).T
+            return dot_state
+
+        k1 = continuous_dynamics(x_values, u_values)
+        k2 = continuous_dynamics(x_values + self.dt / 2 * k1, u_values)
+        k3 = continuous_dynamics(x_values + self.dt / 2 * k2, u_values)
+        k4 = continuous_dynamics(x_values + self.dt * k3, u_values)
+        state_delta = self.dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        next_state = x_values + state_delta
+
+        # Post process, enforce state constraints and set zero beta velocity at joint limit:
         clamped_next_state = torch.max(torch.min(next_state, self.ubx), self.lbx)
-
         zero_dot_beta = clamped_next_state.clone()
         zero_dot_beta[:, self.dot_beta_idx] = 0
-
         clamped_next_state = torch.where(
             (clamped_next_state[:, self.beta_idx] == -config.avant_max_beta) & (clamped_next_state[:, self.dot_beta_idx] < 0),
             zero_dot_beta,
             clamped_next_state
         )
-
         clamped_next_state = torch.where(
             (clamped_next_state[:, self.beta_idx] == config.avant_max_beta) & (clamped_next_state[:, self.dot_beta_idx] > 0),
             zero_dot_beta,

@@ -10,4 +10,4 @@ avant_max_dot_beta = np.deg2rad(33)
 avant_max_dot_dot_beta = np.deg2rad(45)
 avant_min_v = -1
 avant_max_v = 1
-avant_max_a = 1
+avant_max_a = 1.5
