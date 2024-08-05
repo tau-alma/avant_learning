@@ -11,13 +11,10 @@ class AvantDynamics:
     beta_idx = 3
     dot_beta_idx = 4
     v_f_idx = 5
-    x_goal_idx = 6
-    y_goal_idx = 7
-    theta_goal_idx = 8
 
     # Control indices for RL:
-    u_dot_beta_idx = 0
-    u_v_f_idx = 1
+    u_dot_dot_beta_idx = 0
+    u_a_f_idx = 1
 
     # Control indices for MPC:
     u_steer_idx = 0
@@ -30,7 +27,7 @@ class AvantDynamics:
 
         # Define control normalization constants:
         if not eval:
-            self.control_scalers = torch.tensor([config.avant_max_dot_beta, config.avant_max_v], dtype=torch.float32).to(device)
+            self.control_scalers = torch.tensor([config.avant_max_dot_dot_beta, config.avant_max_a], dtype=torch.float32).to(device)
         else:
             self.control_scalers = torch.ones(2, dtype=torch.float32).to(device)
 
@@ -38,14 +35,14 @@ class AvantDynamics:
         self.lbx = torch.tensor([
             -torch.inf, -torch.inf, -torch.inf, 
             -config.avant_max_beta, -config.avant_max_dot_beta, 
-            config.avant_min_v, -torch.inf, -torch.inf, 0
+            config.avant_min_v
         ], dtype=torch.float32).to(device)
         self.ubx = torch.tensor([
             torch.inf, torch.inf, torch.inf, 
             config.avant_max_beta, config.avant_max_dot_beta,
-            config.avant_max_v, torch.inf, torch.inf, 2*torch.pi
+            config.avant_max_v
         ], dtype=torch.float32).to(device)
-
+        
         if eval:
             self.gp_dict = {}
             for name in ["omega_f", "v_f", "dot_beta"]:
@@ -56,69 +53,79 @@ class AvantDynamics:
                 self.gp_dict[name] = gp
 
     def _rl_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
-        u_values = self.control_scalers * u_values
+        def continuous_dynamics(x_values: torch.Tensor, u_values: torch.Tensor):
+            u_values = self.control_scalers * u_values
 
-        desired_beta_accel = (u_values[:, self.u_dot_beta_idx]) / self.dt
-        desired_linear_accel = (u_values[:, self.u_v_f_idx]) / self.dt
+            desired_beta_accel = u_values[:, self.u_dot_dot_beta_idx]
+            desired_linear_accel = u_values[:, self.u_a_f_idx]
 
-        limited_beta_accel = torch.max(
-            torch.min(
-                desired_beta_accel, 
-                config.avant_max_dot_dot_beta * torch.ones_like(desired_beta_accel).to(u_values.device)
-            ), 
-            -config.avant_max_dot_dot_beta * torch.ones_like(desired_beta_accel).to(u_values.device)
-        )
-        limited_linear_accel = torch.max(
-            torch.min(
-                desired_linear_accel, 
-                config.avant_max_a * torch.ones_like(desired_linear_accel).to(u_values.device)
-            ), 
-            -config.avant_max_a * torch.ones_like(desired_linear_accel).to(u_values.device)
-        )
+            # Add some noise to the resulting accelerations
+            std_beta_accel = 1/2 * (0.5*config.avant_max_dot_dot_beta) / (config.avant_max_beta**2 + config.avant_max_dot_beta**2) * (x_values[:, self.beta_idx]**2 + x_values[:, self.dot_beta_idx]**2)
+            # desired_beta_accel += torch.normal(mean=0, std=std_beta_accel)
+            std_linear_accel = 1/2 * (0.5*config.avant_max_a) / (config.avant_max_v**2) * (x_values[:, self.v_f_idx]**2)
+            # desired_linear_accel += torch.normal(mean=0, std=std_linear_accel)
 
-        zero_beta_accel = limited_beta_accel.clone()
-        zero_beta_accel[:] = 0
-        limited_beta_accel = torch.where(
-            (torch.abs(x_values[:, self.v_f_idx]) < 0.1) & (torch.sign(limited_beta_accel) == torch.sign(x_values[:, self.dot_beta_idx])),
-            zero_beta_accel, 
-            limited_beta_accel
-        )
+            # Limit the resulting accelerations
+            limited_beta_accel = torch.max(
+                torch.min(
+                    desired_beta_accel, 
+                    config.avant_max_dot_dot_beta * torch.ones_like(desired_beta_accel).to(u_values.device)
+                ), 
+                -config.avant_max_dot_dot_beta * torch.ones_like(desired_beta_accel).to(u_values.device)
+            )
+            limited_linear_accel = torch.max(
+                torch.min(
+                    desired_linear_accel, 
+                    config.avant_max_a * torch.ones_like(desired_linear_accel).to(u_values.device)
+                ), 
+                -config.avant_max_a * torch.ones_like(desired_linear_accel).to(u_values.device)
+            )
 
-        # To avoid accumulating beta even at the limits, we scale the dot_beta accordingly:
-        distance_to_limit = config.avant_max_beta - torch.abs(x_values[:, self.beta_idx])
-        scaling_factor = torch.min(distance_to_limit / (torch.abs(x_values[:, self.dot_beta_idx]) * self.dt + 1e-5), torch.tensor(1.0).to(x_values.device))
+            # When moving slow (~0.2 m/s), zero out any attempt to increase the center link velocity
+            # zero_beta_accel = limited_beta_accel.clone()
+            # zero_beta_accel[:] = 0
+            # limited_beta_accel = torch.where(
+            #     (torch.abs(x_values[:, self.v_f_idx]) < 0.1) & (torch.sign(limited_beta_accel) == torch.sign(x_values[:, self.dot_beta_idx])),
+            #     zero_beta_accel, 
+            #     limited_beta_accel
+            # )
 
-        omega_f = -(
-            (config.avant_lr * scaling_factor * x_values[:, self.dot_beta_idx] + x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.beta_idx])) 
-            / (config.avant_lf * torch.cos(x_values[:, self.beta_idx]) + config.avant_lr)
-        )
-        dot_state = torch.vstack([
-            x_values[:, self.v_f_idx] * torch.cos(x_values[:, self.theta_f_idx]),
-            x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.theta_f_idx]),
-            omega_f,
-            x_values[:, self.dot_beta_idx],
-            limited_beta_accel,
-            limited_linear_accel,
-            # TODO: move these away from here:
-            torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal x
-            torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal y
-            torch.zeros(u_values.shape[0]).to(u_values.device)   # constant goal theta
-        ]).T
+            # To avoid accumulating beta even at the joint limit, we scale the dot_beta accordingly:
+            distance_to_limit = config.avant_max_beta - torch.abs(x_values[:, self.beta_idx])
+            scaling_factor = torch.min(distance_to_limit / (torch.abs(x_values[:, self.dot_beta_idx]) * self.dt + 1e-5), torch.tensor(1.0).to(x_values.device))
+
+            omega_f = -(
+                (config.avant_lr * scaling_factor * x_values[:, self.dot_beta_idx] + x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.beta_idx])) 
+                / (config.avant_lf * torch.cos(x_values[:, self.beta_idx]) + config.avant_lr)
+            )
+            dot_state = torch.vstack([
+                x_values[:, self.v_f_idx] * torch.cos(x_values[:, self.theta_f_idx]),
+                x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.theta_f_idx]),
+                omega_f,
+                x_values[:, self.dot_beta_idx],
+                limited_beta_accel,
+                limited_linear_accel
+            ]).T
+            return dot_state
         
-        next_state = x_values + self.dt * dot_state
+        k1 = continuous_dynamics(x_values, u_values)
+        k2 = continuous_dynamics(x_values + self.dt / 2 * k1, u_values)
+        k3 = continuous_dynamics(x_values + self.dt / 2 * k2, u_values)
+        k4 = continuous_dynamics(x_values + self.dt * k3, u_values)
+        state_delta = self.dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        next_state = x_values + state_delta
         clamped_next_state = torch.max(torch.min(next_state, self.ubx), self.lbx)
 
+        # Zero out any center link velocity (going towards the closest joint limit direction) at joint limit
         zero_dot_beta = clamped_next_state.clone()
         zero_dot_beta[:, self.dot_beta_idx] = 0
-
-        selector = ((clamped_next_state[:, self.beta_idx] == -config.avant_max_beta) & (clamped_next_state[:, self.dot_beta_idx] < 0)).unsqueeze(1).expand(-1, 9)
+        selector = ((clamped_next_state[:, self.beta_idx] == -config.avant_max_beta) & (clamped_next_state[:, self.dot_beta_idx] < 0)).unsqueeze(1).expand(-1, 6)
         clamped_next_state = torch.where(
             selector,
             zero_dot_beta,
             clamped_next_state
         )
-
-        selector = ((clamped_next_state[:, self.beta_idx] == config.avant_max_beta) & (clamped_next_state[:, self.dot_beta_idx] > 0)).unsqueeze(1).expand(-1, 9)
+        selector = ((clamped_next_state[:, self.beta_idx] == config.avant_max_beta) & (clamped_next_state[:, self.dot_beta_idx] > 0)).unsqueeze(1).expand(-1, 6)
         clamped_next_state = torch.where(
             selector,
             zero_dot_beta,
@@ -175,10 +182,6 @@ class AvantDynamics:
                 x_values[:, self.dot_beta_idx],
                 (dot_beta - x_values[:, self.dot_beta_idx]) / self.dt,  # results in dot_beta after euler integration by dt
                 (v_f - x_values[:, self.v_f_idx]) / self.dt,            # results in v_f after euler integration by dt
-                # TODO: move these away from here:
-                torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal x
-                torch.zeros(u_values.shape[0]).to(u_values.device),  # constant goal y
-                torch.zeros(u_values.shape[0]).to(u_values.device)   # constant goal theta
             ]).T
             return dot_state
 
@@ -187,10 +190,9 @@ class AvantDynamics:
         k3 = continuous_dynamics(x_values + self.dt / 2 * k2, u_values)
         k4 = continuous_dynamics(x_values + self.dt * k3, u_values)
         state_delta = self.dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-
         next_state = x_values + state_delta
 
-        # Post process, enforce state constraints and set zero beta velocity at joint limit:
+        # Zero out any center link velocity (going towards the closest joint limit direction) at joint limit
         clamped_next_state = torch.max(torch.min(next_state, self.ubx), self.lbx)
         zero_dot_beta = clamped_next_state.clone()
         zero_dot_beta[:, self.dot_beta_idx] = 0

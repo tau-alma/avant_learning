@@ -7,7 +7,9 @@ from torch import nn
 from stable_baselines3.common.preprocessing import get_flattened_obs_dim, is_image_space
 from stable_baselines3.common.type_aliases import TensorDict
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from typing import Dict
+from stable_baselines3.common.policies import ContinuousCritic
+from stable_baselines3.sac.policies import MultiInputPolicy
+from typing import Dict, List, Type
 
 class GoalEnv(ABC):
     """

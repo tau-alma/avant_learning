@@ -39,8 +39,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             high=np.ones(n_actions), 
             dtype=np.float32)
         
-        l_achieved, l_desired = self._compute_goals(self.dynamics.lbx.unsqueeze(0))
-        u_achieved, u_desired = self._compute_goals(self.dynamics.ubx.unsqueeze(0))
+        l_achieved, l_desired = self._compute_goals(torch.zeros([1, 3]).to(device), self.dynamics.lbx.unsqueeze(0))
+        u_achieved, u_desired = self._compute_goals(torch.zeros([1, 3]).to(device), self.dynamics.ubx.unsqueeze(0))
         self.single_observation_space = spaces.Dict(
             dict(
                 observation=spaces.Box(
@@ -61,6 +61,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             )
         )
         
+        self.goals = torch.empty([num_envs, 3]).to(device)
         self.states = torch.empty([num_envs, len(self.dynamics.lbx)]).to(device)
         self.num_steps = torch.zeros(num_envs).to(device)
         self.reward_target = -1e-1
@@ -100,15 +101,15 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         velocities = states[:, self.dynamics.v_f_idx, None].cpu().numpy()
         return np.c_[betas, dot_betas, velocities]
     
-    def _compute_goals(self, states: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_goals(self, goals: torch.Tensor, states: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
         x_f = states[:, self.dynamics.x_f_idx].cpu().numpy()
         y_f = states[:, self.dynamics.y_f_idx].cpu().numpy()
         theta_f = states[:, self.dynamics.theta_f_idx]
         s_theta_f, c_theta_f = torch.sin(theta_f).cpu().numpy(), torch.cos(theta_f).cpu().numpy()
 
-        x_goal = states[:, self.dynamics.x_goal_idx].cpu().numpy()
-        y_goal = states[:, self.dynamics.y_goal_idx].cpu().numpy()
-        theta_goal = states[:, self.dynamics.theta_goal_idx]
+        x_goal = goals[:, 0].cpu().numpy()
+        y_goal = goals[:, 1].cpu().numpy()
+        theta_goal = goals[:, 2]
         s_theta_goal, c_theta_goal = torch.sin(theta_goal).cpu().numpy(), torch.cos(theta_goal).cpu().numpy()
 
         beta = states[:, self.dynamics.beta_idx].cpu().numpy()
@@ -120,12 +121,12 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             np.c_[x_goal, y_goal, s_theta_goal, c_theta_goal, np.zeros_like(beta), np.zeros_like(v_f), np.zeros_like(dot_beta)]
         )
 
-    def _construct_observation(self, states: torch.Tensor):
-        achieved_goals, desired_goals = self._compute_goals(states)
+    def _construct_observation(self):
+        achieved_goals, desired_goals = self._compute_goals(self.goals, self.states)
         obs = {
             "achieved_goal": achieved_goals,
             "desired_goal": desired_goals,
-            "observation": self._observe(states)
+            "observation": self._observe(self.states)
         }
         return obs
 
@@ -150,10 +151,10 @@ class AvantGoalEnv(VecEnv, GoalEnv):
 
         reward = np.where(
             (pos_error < 0.1) &
-            (np.abs(hdg_error_deg) < 2.5) &
-            (np.abs(beta_error_deg) < 2.5) & 
-            (np.abs(dot_beta_error_deg) < 2.5) &
-            (np.abs(velocity_error) < 0.1) 
+            (np.abs(hdg_error_deg) < 2.5) #&
+            # (np.abs(beta_error_deg) < 2.5) & 
+            # (np.abs(dot_beta_error_deg) < 2.5) &
+            # (np.abs(velocity_error) < 0.1) 
             , np.zeros(len(achieved_goal))
             , -np.ones(len(achieved_goal))
         )
@@ -167,8 +168,12 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.num_steps += 1
 
         info = [{} for i in range(self.num_envs)]
-        tmp_obs = self._construct_observation(self.states)
+        tmp_obs = self._construct_observation()
         reward = self.compute_reward(tmp_obs["achieved_goal"], tmp_obs["desired_goal"], info)
+        
+        # Policy seems to learn an action sequence of [max_a, min_a, max_a, ...] to maintain a constant velocity, this should help encourage 0 acceleration instead:
+        accel_penalty = torch.sum(actions**2, axis=1).cpu().numpy()
+        # reward -= 1e-2 * accel_penalty
 
         terminated = torch.from_numpy(reward > self.reward_target).to(self.states.device)
         truncated = (self.num_steps > self.time_limit_s / self.dynamics.dt)
@@ -187,7 +192,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             # Reset done envs:
             self._internal_reset(done_indices)
 
-        obs = self._construct_observation(self.states)
+        obs = self._construct_observation()
 
         return obs, reward, done.cpu().numpy(), info
 
@@ -202,7 +207,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             # Initial pose should be far enough away from goal pose:
             i_g_dist = torch.norm(pose_samples[:, :2] - pose_samples[:, 3:5], dim=1)
             valid_indices = torch.argwhere(
-                (i_g_dist > 2.5)
+                (i_g_dist > 0.5)
             ).flatten()
 
             # Apply all the valid env samples:
@@ -211,9 +216,9 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                 continue
             updated_env_indices = indices[:n_valid]
             np_valid_indices = valid_indices.cpu().numpy()[:n_valid]
+            self.goals[updated_env_indices] = pose_samples[np_valid_indices, 3:6]
             self.states[updated_env_indices, :3] = pose_samples[np_valid_indices, :3]
             self.states[updated_env_indices, 3:6] = torch.zeros((n_valid, 3)).to(self.states.device)
-            self.states[updated_env_indices, 6:9] = pose_samples[np_valid_indices, 3:6]
             self.num_steps[updated_env_indices] = 0
 
             if len(valid_indices) >= envs_left:
@@ -237,7 +242,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         else:
             self._internal_reset(torch.arange(self.num_envs).to(self.states.device))
 
-        return self._construct_observation(self.states)
+        return self._construct_observation()
 
     def render(self, indices: List[int] = [0, 1], mode='rgb_array', horizon: np.ndarray = np.array([])):
         if len(horizon):
@@ -247,9 +252,9 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         y_f = self.states[indices, self.dynamics.y_f_idx].cpu().numpy()
         theta_f = self.states[indices, self.dynamics.theta_f_idx].cpu().numpy()
         betas = self.states[indices, self.dynamics.beta_idx].cpu().numpy()
-        x_goal = self.states[indices, self.dynamics.x_goal_idx].cpu().numpy()
-        y_goal = self.states[indices, self.dynamics.y_goal_idx].cpu().numpy()
-        theta_goal = self.states[indices, self.dynamics.theta_goal_idx].cpu().numpy()
+        x_goal = self.goals[indices, 0].cpu().numpy()
+        y_goal = self.goals[indices, 1].cpu().numpy()
+        theta_goal = self.goals[indices, 2].cpu().numpy()
 
         center = self.RENDER_RESOLUTION // 2
         pos_to_pixel_scaler = self.RENDER_RESOLUTION / (4*POSITION_BOUND)
