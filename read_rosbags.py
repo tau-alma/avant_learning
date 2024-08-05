@@ -9,13 +9,10 @@ from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 
 ROOT_DIR = 'avant_identification_data/'
-KEYS = ['x', 'y', 'theta', 'beta', 'omega', 'dot_beta', 'vx', 'steer', 'gas']
+KEYS = ['beta', 'omega', 'dot_beta', 'vx', 'steer', 'gas']
 
 def read_bag_file(db_file):
     sensor_data = {
-        'x': [],
-        'y': [],
-        'theta': [],
         'beta': [],
         'omega': [],
         'dot_beta': [],
@@ -24,16 +21,12 @@ def read_bag_file(db_file):
         'gas': [],
     }
     timestamps = {
-        'x': [],
-        'y': [],
-        'theta': [],
         'beta': [],
         'omega': [],
         'dot_beta': [],
         'vx': [],
         'steer': [],
         'gas': [],
-        'wanted_speeds': []
     }
 
     storage_options = rosbag2_py.StorageOptions(uri=db_file, storage_id='sqlite3')
@@ -52,38 +45,31 @@ def read_bag_file(db_file):
         msg = deserialize_message(data, msg_class)
 
         if topic == '/wheel_odometry':
-            sensor_data['x'].append(msg.pose.pose.position.x)
-            timestamps['x'].append(timestamp)
-            sensor_data['y'].append(msg.pose.pose.position.y)
-            timestamps['y'].append(timestamp)
+            header_timestamp = msg.header.stamp.sec * 1e9 + msg.header.stamp.nanosec
             sensor_data['vx'].append(msg.twist.twist.linear.x)
-            timestamps['vx'].append(timestamp)            
+            timestamps['vx'].append(header_timestamp)            
         elif topic == '/resolver':
+            header_timestamp = msg.header.stamp.sec * 1e9 + msg.header.stamp.nanosec
             sensor_data['beta'].append(msg.position[0])
             sensor_data['dot_beta'].append(msg.velocity[0])
-            timestamps['beta'].append(timestamp)
-            timestamps['dot_beta'].append(timestamp)
+            timestamps['beta'].append(header_timestamp)
+            timestamps['dot_beta'].append(header_timestamp)
         elif topic == '/front_axle_IMU':
+            header_timestamp = msg.header.stamp.sec * 1e9 + msg.header.stamp.nanosec
             sensor_data['omega'].append(msg.angular_velocity.z)
-            timestamps['omega'].append(timestamp)
+            timestamps['omega'].append(header_timestamp)
         elif topic == '/motion_commands':
             sensor_data['steer'].append(msg.position[1])
             sensor_data['gas'].append(msg.position[0] * msg.position[2])
             timestamps['steer'].append(timestamp)
             timestamps['gas'].append(timestamp)
-        elif topic == '/wanted_speeds':
-            timestamps['wanted_speeds'].append(timestamp)
-        elif topic == '/GNSS_attitude/Pose':
-            theta = scipy.spatial.transform.Rotation.from_quat([msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.y, msg.pose.pose.orientation.w])
-            sensor_data['theta'].append(theta.as_euler("xyz")[2])
-            timestamps['theta'].append(timestamp)
 
     return sensor_data, timestamps
 
 def interpolate_sensor_data(sensor_data, timestamps, sample_rate):
     # These tell us when the autonomous operation started/stopped:
-    min_timestamp = min(timestamps["wanted_speeds"])
-    max_timestamp = max(timestamps["wanted_speeds"])
+    min_timestamp = min(timestamps["steer"])
+    max_timestamp = max(timestamps["steer"])
 
     # Create a common time base for interpolation
     common_time = np.arange(min_timestamp, max_timestamp, sample_rate * 1e9)
@@ -104,7 +90,7 @@ if __name__ == '__main__':
         if ".csv" in folder or ".png" in folder or ".json" in folder:
             continue
 
-        db_file = os.path.join(ROOT_DIR, folder) + f'/{folder}_0.db3'
+        db_file = os.path.join(ROOT_DIR, folder) + f'/{folder}.db3'
         
         sensor_data, timestamps = read_bag_file(db_file)
         common_time, data_array = interpolate_sensor_data(sensor_data, timestamps, config.sample_rate)

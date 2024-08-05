@@ -71,9 +71,9 @@ class MPCActor:
         )
         f = cs.Function('f', [ocp_x, ocp_u, ocp_p], [f_expr])
 
-        accel_penalty = 1e-2*dot_dot_beta**2 + 1e-2*a_f**2
+        accel_penalty = 1e-3*dot_dot_beta**2 + 1e-3*a_f**2
         policy_deviation = (dot_beta_ref - policy_dot_beta)**2 + (v_f_ref - policy_v_f)**2
-        standstill_turning_penalty = (1 - cs.tanh(v_f_ref**2 / 0.15)) * (45/cs.pi * dot_beta_ref)**2
+        standstill_turning_penalty = (1 - cs.tanh(v_f_ref**2 / 0.15)) * 10*(dot_beta_ref)**2
         l = cs.Function('l', [ocp_x, ocp_u, ocp_p], [accel_penalty + standstill_turning_penalty])
 
         problem = SymbolicMPCProblem(
