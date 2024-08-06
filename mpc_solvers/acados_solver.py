@@ -67,8 +67,6 @@ class AcadosSolver:
             self.ocp.constraints.idxsbx = np.array([*list(problem.ocp_x_slacks.keys())])
             self.ocp.constraints.idxsbx_e = self.ocp.constraints.idxsbx
             state_slack_weights = np.array([*list(problem.ocp_x_slacks.values())])
-        else:
-            state_slack_weights = np.array([])
 
         # Control constraints:
         self.ocp.constraints.lbu = problem.lbu_vec
@@ -140,10 +138,10 @@ class AcadosSolver:
         self.ocp.solver_options.nlp_solver_type = "SQP_RTI"
         self.ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
         self.ocp.solver_options.regularize_method = "PROJECT"
-        self.ocp.solver_options.tol = 1e-5
+        self.ocp.solver_options.tol = 1e-4
         self.ocp.solver_options.print_level = 0
 
-        self.ocp.solver_options.qp_solver_iter_max = 250
+        self.ocp.solver_options.qp_solver_iter_max = 100
         self.ocp.qp_solver_warm_start = 2
         self.ocp.solver_options.hpipm_mode = 'SPEED'
         if problem.terminal_model_external_shared_lib_dir is not None and problem.terminal_model_external_shared_lib_name is not None:
@@ -155,7 +153,7 @@ class AcadosSolver:
         else:
             self.ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
         self.ocp.solver_options.levenberg_marquardt = 1e-4
-        # self.ocp.solver_options.nlp_solver_step_length = 0.5
+        # self.ocp.solver_options.nlp_solver_step_length = 0.25
 
         self.acados_solver = AcadosOcpSolver(self.ocp, json_file="acados_ocp.json")
 
