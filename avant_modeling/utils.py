@@ -12,39 +12,39 @@ from matplotlib.ticker import FormatStrFormatter
 
 def plot_sample_data(data, sample_indices, out_file):
     # Plot some properties of the training data:
-    fig, ax = plt.subplots(4, 2, figsize=(1000 / 100, 1000 / 100))
-    fig.tight_layout()
+    fig, ax = plt.subplots(4, 2, figsize=(20, 20))
     for i in range(4):
         for j in range(2):
             if i == 0:
                 if j == 0:
-                    ax[i, j].set_title("steer")
+                    ax[i, j].set_title("steer", fontsize=40)
                     ax[i, j].hist(data[sample_indices, 7], 250)
                 if j == 1:
-                    ax[i, j].set_title("gas")
+                    ax[i, j].set_title("gas", fontsize=40)
                     ax[i, j].hist(data[sample_indices, 8], 250)
             if i == 1:
                 if j == 0:
-                    ax[i, j].set_title("v_f")
+                    ax[i, j].set_title("v_f", fontsize=40)
                     ax[i, j].hist(data[sample_indices, 6], 250)
                 if j == 1:
-                    ax[i, j].set_title("omega")
+                    ax[i, j].set_title("omega", fontsize=40)
                     ax[i, j].hist(data[sample_indices, 4], 250)
             if i == 2:
                 if j == 0:
-                    ax[i, j].set_title("beta")
+                    ax[i, j].set_title("beta", fontsize=40)
                     ax[i, j].hist(data[sample_indices, 3], 250)
                 if j == 1:
-                    ax[i, j].set_title("dot_beta")
+                    ax[i, j].set_title("dot_beta", fontsize=40)
                     ax[i, j].hist(data[sample_indices, 5], 250)
             if i == 3:
                 if j == 0:
-                    ax[i, j].set_title("dot_dot_beta")
+                    ax[i, j].set_title("dot_dot_beta", fontsize=40)
                     ax[i, j].hist(data[sample_indices, 9], 250)
                 if j == 1:
-                    ax[i, j].set_title("a_f")
+                    ax[i, j].set_title("a_f", fontsize=40)
                     ax[i, j].hist(data[sample_indices, 10], 250)
-    plt.savefig(out_file)
+    plt.tight_layout()
+    plt.savefig(out_file, bbox_inches='tight')
     plt.close()
 
 
@@ -66,21 +66,24 @@ def plot_error_density(errors, name, out_file):
     elif name == "v_f":
         xlabel = f"|{name}| error ($m/s$)"
     else:
-        xlabel = f"|{name}| error ($deg/s²$)"
+        xlabel = f"|{name}| error"
+    
+    xlabel += "\n(%.3f +/- %.3f vs %.3f +/- %.3f)" % (np.mean(errors[:, 0]), np.std(errors[:, 0]), np.mean(errors[:, 1]), np.std(errors[:, 1]))
 
     sns.kdeplot(data=df_errors, x='Error', hue='Dynamics model', ax=ax, fill=True)
     ax.set_title(' ', fontsize=40)
     ax.set_ylabel("Density", fontsize=40)
     ax.set_xlabel(xlabel, fontsize=40)
     ax.set_xlim(left=0, right=max(
-            errors[:, 0].mean() + 2* errors[:, 0].std(),
-            errors[:, 1].mean() + 2* errors[:, 1].std(),
+            errors[:, 0].mean() + 3* errors[:, 0].std(),
+            errors[:, 1].mean() + 3* errors[:, 1].std(),
         )
     )
     ax.tick_params(axis='both', which='major', labelsize=40)
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
 
     # Adjust layout
+    plt.grid(True)
     plt.tight_layout()
     plt.savefig(out_file, bbox_inches='tight')
     plt.close()
@@ -93,22 +96,25 @@ def filter_data_batch(batch, data_idx_deriv_delay, output_dir=None):
     window_size = int(1e9*config.savgol_p / np.mean(dt_ns))
 
     timestamps = batch[config.low_pass_window_size // 4: -config.low_pass_window_size // 4][:-1, 0].copy()
+    per_idx_timestamps = []
+
+    max_delay = 0
 
     for idx, deriv, delay, name in data_idx_deriv_delay:
         if delay == 0:
+            per_idx_timestamps.append(timestamps)
             selected = batch[:, idx].copy()
         if delay > 0:
+            per_idx_timestamps.append(timestamps[delay:])
             selected = batch[delay:, idx].copy()
         if delay < 0:
+            per_idx_timestamps.append(timestamps[:delay])
             selected = batch[:delay, idx].copy()
 
         if output_dir is not None:
             save_spectrum_plot(selected, 1e9 / np.mean(dt_ns), output_dir + "/data_spectrum_%s.png" % name)
 
-        if name != "theta":
-            selected = zero_phase_filtering(selected, 2, 1e9 / np.mean(dt_ns), config.low_pass_window_size, 3)
-        else:
-            selected = selected[config.low_pass_window_size // 4: -config.low_pass_window_size // 4]
+        selected = zero_phase_filtering(selected, 2, 1e9 / np.mean(dt_ns), config.low_pass_window_size, 3)
 
         if deriv:
             savgol = 1e9*savgol_filter(
@@ -118,12 +124,9 @@ def filter_data_batch(batch, data_idx_deriv_delay, output_dir=None):
             selected = 1e9 * (selected[1:] - selected[:-1]) / dt_ns.mean()
             selected = np.r_[selected, 0]
         else:
-            if name != "theta":
-                savgol = savgol_filter(
-                    selected, window_length=window_size, polyorder=config.savgol_k, deriv=0
-                )[:-1]
-            else:
-                savgol = selected[:-1]
+            savgol = savgol_filter(
+                selected, window_length=window_size, polyorder=config.savgol_k, deriv=0
+            )[:-1]
 
         if delay > 0 or delay < 0:
             selected = np.r_[selected, np.zeros(np.abs(delay))]
@@ -136,7 +139,10 @@ def filter_data_batch(batch, data_idx_deriv_delay, output_dir=None):
             tmp_original = np.c_[tmp_original, selected[:-1]]
             tmp_filtered = np.c_[tmp_filtered, savgol]
 
-    return timestamps, tmp_original, tmp_filtered
+        if abs(delay) > max_delay:
+            max_delay = delay
+
+    return [t[:len(tmp_original) - max_delay] for t in per_idx_timestamps], tmp_original[:-abs(max_delay)], tmp_filtered[:-abs(max_delay)]
 
 
 def save_spectrum_plot(data, fs, path):

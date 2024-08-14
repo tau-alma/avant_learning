@@ -23,10 +23,7 @@ class MPCActor:
         theta_f = cs.MX.sym("theta_f")
         beta = cs.MX.sym("beta")
         dot_beta_ref = cs.MX.sym("dot_beta_ref")
-        dot_beta_ref_del2 = cs.MX.sym("dot_beta_ref_del2")
-        dot_beta_ref_del1 = cs.MX.sym("dot_beta_ref_del1")
         v_f_ref = cs.MX.sym("v_f_ref")
-        v_f_ref_del1 = cs.MX.sym("v_f_ref_del1")
 
         ocp_x = cs.vertcat(x_f, y_f, theta_f, beta, dot_beta_ref, v_f_ref)
         lbx_vec = np.array([
@@ -74,12 +71,13 @@ class MPCActor:
         f = cs.Function('f', [ocp_x, ocp_u, ocp_p], [f_expr])
 
         accel_penalty = 1e-3*dot_dot_beta**2 + 1e-3*a_f**2
-        standstill_turning_penalty = (1 - cs.tanh(v_f_ref**2 / 0.15)) * 10*(dot_beta_ref)**2
+        standstill_turning_penalty = (1 - cs.tanh(v_f_ref**2 / 0.05)) * (dot_beta_ref)**2
         l = cs.Function('l', [ocp_x, ocp_u, ocp_p], [accel_penalty + standstill_turning_penalty])
 
         problem = SymbolicMPCProblem(
             N=10,
-            h=0.1,
+            h=0.2,
+            input_delay=0.2,
             ocp_x=ocp_x,
             lbx_vec=lbx_vec,
             ubx_vec=ubx_vec,

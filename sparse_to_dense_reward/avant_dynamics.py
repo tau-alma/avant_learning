@@ -12,6 +12,12 @@ class AvantDynamics:
     dot_beta_idx = 4
     v_f_idx = 5
 
+    # Additional states for handling the actuator delays (only used during evaluation, i.e. in "_mpc_dynamics_fun")
+    steer_del3_idx = 6
+    steer_del2_idx = 7
+    steer_del1_idx = 8
+    throttle_del1_idx = 9
+
     # Control indices for RL:
     u_dot_dot_beta_idx = 0
     u_a_f_idx = 1
@@ -21,6 +27,8 @@ class AvantDynamics:
     u_throttle_idx = 1
 
     def __init__(self, dt: float, device: str, eval: bool):
+        assert dt == 1/10, "Current model assumes dt = 1/10hz to correctly represent actuator delay"
+
         self.dt = dt
         self.device = device
         self.eval = eval
@@ -32,26 +40,42 @@ class AvantDynamics:
             self.control_scalers = torch.ones(2, dtype=torch.float32).to(device)
 
         # Define state bounds:
-        self.lbx = torch.tensor([
-            -torch.inf, -torch.inf, -torch.inf, 
-            -config.avant_max_beta, -config.avant_max_dot_beta, 
-            config.avant_min_v
-        ], dtype=torch.float32).to(device)
-        self.ubx = torch.tensor([
-            torch.inf, torch.inf, torch.inf, 
-            config.avant_max_beta, config.avant_max_dot_beta,
-            config.avant_max_v
-        ], dtype=torch.float32).to(device)
+        if not eval:
+            self.lbx = torch.tensor([
+                -torch.inf, -torch.inf, -torch.inf, 
+                -config.avant_max_beta, -config.avant_max_dot_beta, 
+                config.avant_min_v
+            ], dtype=torch.float32).to(device)
+            self.ubx = torch.tensor([
+                torch.inf, torch.inf, torch.inf, 
+                config.avant_max_beta, config.avant_max_dot_beta,
+                config.avant_max_v
+            ], dtype=torch.float32).to(device)
+        else:
+
+            self.lbx = torch.tensor([
+                -torch.inf, -torch.inf, -torch.inf, 
+                -config.avant_max_beta, -config.avant_max_dot_beta, 
+                config.avant_min_v,
+                -1, -1, -1, -1
+            ], dtype=torch.float32).to(device)
+            self.ubx = torch.tensor([
+                torch.inf, torch.inf, torch.inf, 
+                config.avant_max_beta, config.avant_max_dot_beta,
+                config.avant_max_v,
+                1, 1, 1, 1
+            ], dtype=torch.float32).to(device)
         
         if eval:
             self.gp_dict = {}
-            for name in ["omega_f", "v_f", "dot_beta"]:
+            for name in ["omega_f", "truncated_v_f", "truncated_dot_beta"]:
                 data_x = torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_inputs.pth").to(device)
                 data_y = torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_targets.pth").to(device)
                 gp = GPModel(data_x, data_y, train_epochs=0, device=device).to(device)
                 gp.load_state_dict(torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_model.pth"))
                 self.gp_dict[name] = gp
 
+    # Simple kinematic model with direct control of accelerations, used to train RL policy
     def _rl_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
         def continuous_dynamics(x_values: torch.Tensor, u_values: torch.Tensor):
             u_values = self.control_scalers * u_values
@@ -61,9 +85,9 @@ class AvantDynamics:
 
             # Add some noise to the resulting accelerations
             std_beta_accel = 1/2 * (0.5*config.avant_max_dot_dot_beta) / (config.avant_max_beta**2 + config.avant_max_dot_beta**2) * (x_values[:, self.beta_idx]**2 + x_values[:, self.dot_beta_idx]**2)
-            # desired_beta_accel += torch.normal(mean=0, std=std_beta_accel)
+            desired_beta_accel += torch.normal(mean=0, std=std_beta_accel)
             std_linear_accel = 1/2 * (0.5*config.avant_max_a) / (config.avant_max_v**2) * (x_values[:, self.v_f_idx]**2)
-            # desired_linear_accel += torch.normal(mean=0, std=std_linear_accel)
+            desired_linear_accel += torch.normal(mean=0, std=std_linear_accel)
 
             # Limit the resulting accelerations
             limited_beta_accel = torch.max(
@@ -80,15 +104,6 @@ class AvantDynamics:
                 ), 
                 -config.avant_max_a * torch.ones_like(desired_linear_accel).to(u_values.device)
             )
-
-            # When moving slow (~0.2 m/s), zero out any attempt to increase the center link velocity
-            # zero_beta_accel = limited_beta_accel.clone()
-            # zero_beta_accel[:] = 0
-            # limited_beta_accel = torch.where(
-            #     (torch.abs(x_values[:, self.v_f_idx]) < 0.1) & (torch.sign(limited_beta_accel) == torch.sign(x_values[:, self.dot_beta_idx])),
-            #     zero_beta_accel, 
-            #     limited_beta_accel
-            # )
 
             # To avoid accumulating beta even at the joint limit, we scale the dot_beta accordingly:
             distance_to_limit = config.avant_max_beta - torch.abs(x_values[:, self.beta_idx])
@@ -134,6 +149,7 @@ class AvantDynamics:
 
         return clamped_next_state
 
+    # More detailed dynamical model used to evaluate the designed controller
     def _mpc_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
 
         def continuous_dynamics(x_values: torch.Tensor, u_values: torch.Tensor):
@@ -149,17 +165,17 @@ class AvantDynamics:
                 / (config.avant_lf * torch.cos(x_values[:, self.beta_idx]) + config.avant_lr)
             )
             gp_omega_f_inputs = torch.vstack([
-                x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], x_values[:, self.v_f_idx], u_values[:, self.u_steer_idx]
+                x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], x_values[:, self.v_f_idx]
             ]).T
             gp_omega_f = self.gp_dict["omega_f"](gp_omega_f_inputs).mean
             omega_f = nominal_omega_f + gp_omega_f
 
             # Nominal and GP for v_f
-            nominal_v_f = 3 * u_values[:, self.u_throttle_idx]
+            nominal_v_f = 3 * x_values[:, self.throttle_del1_idx]
             gp_v_f_inputs = torch.vstack([
-                x_values[:, self.beta_idx], u_values[:, self.u_throttle_idx]
+                x_values[:, self.beta_idx], x_values[:, self.throttle_del1_idx]
             ]).T
-            gp_v_f = self.gp_dict["v_f"](gp_v_f_inputs).mean
+            gp_v_f = self.gp_dict["truncated_v_f"](gp_v_f_inputs).mean
             v_f = nominal_v_f + gp_v_f
 
             # Nominal and GP for dot_dot_beta        
@@ -168,28 +184,32 @@ class AvantDynamics:
             eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
             eps = eps0 - x_values[:, self.beta_idx]
             k = 10 * a * b * np.sin(eps) / np.sqrt(a**2 + b**2 - 2*a*b*np.cos(eps))
-            nominal_dot_beta = u_values[:, self.u_steer_idx] / k
+            nominal_dot_beta = x_values[:, self.steer_del3_idx] / k
             gp_dot_beta_inputs = torch.vstack([
-                x_values[:, self.beta_idx], x_values[:, self.v_f_idx], u_values[:, self.u_steer_idx]
+                x_values[:, self.beta_idx], v_f, x_values[:, self.steer_del3_idx]
             ]).T
-            gp_dot_beta = self.gp_dict["dot_beta"](gp_dot_beta_inputs).mean
+            gp_dot_beta = self.gp_dict["truncated_dot_beta"](gp_dot_beta_inputs).mean
             dot_beta = nominal_dot_beta + gp_dot_beta
 
             dot_state = torch.vstack([
                 v_f * torch.cos(x_values[:, self.theta_f_idx]),
                 v_f * torch.sin(x_values[:, self.theta_f_idx]),
                 omega_f,
-                x_values[:, self.dot_beta_idx],
-                (dot_beta - x_values[:, self.dot_beta_idx]) / self.dt,  # results in dot_beta after euler integration by dt
-                (v_f - x_values[:, self.v_f_idx]) / self.dt,            # results in v_f after euler integration by dt
+                dot_beta,
+
+                (dot_beta - x_values[:, self.dot_beta_idx]) / self.dt, # dot_beta
+                (v_f - x_values[:, self.v_f_idx]) / self.dt,           # a_f
+
+                (x_values[:, self.steer_del2_idx] - x_values[:, self.steer_del3_idx]) / self.dt,    # del_steer3
+                (x_values[:, self.steer_del1_idx] - x_values[:, self.steer_del2_idx]) / self.dt,    # del_steer2
+                (u_values[:, self.u_steer_idx] - x_values[:, self.steer_del1_idx]) / self.dt,       # del_steer1
+
+                (u_values[:, self.u_throttle_idx] - x_values[:, self.throttle_del1_idx]) / self.dt  # del_throttle1
             ]).T
             return dot_state
 
         k1 = continuous_dynamics(x_values, u_values)
-        k2 = continuous_dynamics(x_values + self.dt / 2 * k1, u_values)
-        k3 = continuous_dynamics(x_values + self.dt / 2 * k2, u_values)
-        k4 = continuous_dynamics(x_values + self.dt * k3, u_values)
-        state_delta = self.dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        state_delta = self.dt * k1
         next_state = x_values + state_delta
 
         # Zero out any center link velocity (going towards the closest joint limit direction) at joint limit

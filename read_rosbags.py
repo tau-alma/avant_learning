@@ -95,5 +95,8 @@ if __name__ == '__main__':
         sensor_data, timestamps = read_bag_file(db_file)
         common_time, data_array = interpolate_sensor_data(sensor_data, timestamps, config.sample_rate)
 
+        where_to_zero = ((data_array[:, 0] < -0.7) & (data_array[:, 4] < 0)) | ((data_array[:, 0] > 0.7) & (data_array[:, 4] > 0))
+        data_array[where_to_zero, 4] = 0
+
         header = 'timestamp,' + ','.join(KEYS)
         np.savetxt(os.path.join(ROOT_DIR, f'{folder}.csv'), np.column_stack((common_time, data_array)), delimiter=',', header=header, comments='')

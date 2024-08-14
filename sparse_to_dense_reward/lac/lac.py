@@ -22,9 +22,6 @@ class LAC(OffPolicyAlgorithm):
     """
     Lyapunov Actor Critic
 
-    Note: we use double q target and not value target as discussed
-    in https://github.com/hill-a/stable-baselines/issues/270
-
     :param policy: The policy model to use (MlpPolicy, CnnPolicy, ...)
     :param env: The environment to learn from (if registered in Gym, can be str)
     :param learning_rate: learning rate for adam optimizer,
@@ -70,6 +67,7 @@ class LAC(OffPolicyAlgorithm):
     :param device: Device (cpu, cuda, ...) on which the code should be run.
         Setting it to auto, the code will be run on the GPU if possible.
     :param _init_setup_model: Whether or not to build the network at the creation of the instance
+    :param alpha3: The Lyapunov decrease coefficient
     """
 
     policy_aliases: ClassVar[Dict[str, Type[BasePolicy]]] = {
@@ -108,7 +106,8 @@ class LAC(OffPolicyAlgorithm):
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
-        _init_setup_model: bool = True
+        _init_setup_model: bool = True,
+        alpha3: float = 1e-2
     ):
         super().__init__(
             policy,
@@ -141,7 +140,7 @@ class LAC(OffPolicyAlgorithm):
         self.target_update_interval = target_update_interval
         self.target_entropy = target_entropy
     
-        self.alpha3 = th.tensor([1e-2], device=self.device)
+        self.alpha3 = alpha3
         # Optimizers for the lyapunov loss lagrange variables:
         self.log_beta = th.tensor([1.0], device=self.device).requires_grad_(True)
         self.beta_optimizer: Optional[th.optim.Adam] = None
@@ -162,6 +161,8 @@ class LAC(OffPolicyAlgorithm):
         if self.target_entropy == "auto":
             # automatically set target entropy if needed
             self.target_entropy = float(-np.prod(self.env.action_space.shape).astype(np.float32))  # type: ignore
+            print("----------------------------------")
+            print(self.target_entropy)
         else:
             # Force conversion
             # this will also throw an error for unexpected string
@@ -200,20 +201,20 @@ class LAC(OffPolicyAlgorithm):
             log_prob = log_prob.reshape(-1, 1)
 
             # Select action according to policy
-            next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
-            # Compute the next Q values: min over all critics targets
-            next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
-            next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+            next_actions_pi, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
+            # Compute the next L values: max over all critics targets
+            next_L_values = th.cat(self.critic_target(replay_data.next_observations, next_actions_pi), dim=1)
+            next_L_values, _ = th.max(next_L_values, dim=1, keepdim=True)
             
             # td error
-            target_q_values = -replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values.detach()
+            target_L_values = -replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_L_values.detach()
 
-            # Get current Q-values estimates for each critic network
+            # Get current L-values estimates for each critic network
             # using action from the replay buffer
-            current_q_values = self.critic(replay_data.observations, replay_data.actions)
+            current_L_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
-            critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
+            critic_loss = 0.5 * sum(F.mse_loss(current_L, target_L_values) for current_L in current_L_values)
             assert isinstance(critic_loss, th.Tensor)  # for type checker
             critic_losses.append(critic_loss.item())  # type: ignore[union-attr]
 
@@ -226,13 +227,14 @@ class LAC(OffPolicyAlgorithm):
             beta = th.exp(self.log_beta)
             llambda = th.exp(self.log_llambda)
 
+            current_L_tensor = th.cat(current_L_values, dim=1)
+            max_current_L, _ = th.max(current_L_tensor, dim=1, keepdim=True)
+
             # Compute actor loss, i.e. solve the inner min problem of the lagrangian:
-            current_q_tensor = th.cat(current_q_values, dim=1)
-            min_current_q, _ = th.min(current_q_tensor, dim=1, keepdim=True)
-            # Actor loss: entropy target term + lyapunov exponential decrease term
             actor_loss = th.mean(
-                beta.detach()*(self.target_entropy - (-log_prob)) 
-                + llambda.detach()*(next_q_values - min_current_q.detach() + self.alpha3*min_current_q.detach())
+                beta.detach()*log_prob
+                + llambda.detach()*next_L_values
+                # + (1 - beta.detach()) * (1 - llambda.detach()) * max_qf_pi
             )
             self.actor.optimizer.zero_grad()
             actor_loss.backward()
@@ -240,13 +242,13 @@ class LAC(OffPolicyAlgorithm):
             actor_losses.append(actor_loss.item())
 
             # Compute the lagrange multiplier loss(es), i.e. solve the outer max problem of the lagrangian:
-            beta_loss = -beta * th.mean(self.target_entropy - (-log_prob.detach()))
+            beta_loss = -beta * th.mean(self.target_entropy + log_prob.detach())
             self.beta_optimizer.zero_grad()
             beta_loss.backward()
             self.beta_optimizer.step()
             beta_losses.append(beta_loss.item())
             
-            llambda_loss = -llambda * th.mean(next_q_values.detach() - min_current_q.detach() + self.alpha3*min_current_q.detach())
+            llambda_loss = -llambda * th.mean(next_L_values.detach() - max_current_L.detach() + self.alpha3*max_current_L.detach())
             self.llambda_optimizer.zero_grad()
             llambda_loss.backward()
             self.llambda_optimizer.step()
@@ -255,6 +257,7 @@ class LAC(OffPolicyAlgorithm):
             # Early on during the training there will be large violations of the lyapunov constraint due to a bad policy,
             # therefore it is wise to clamp the associated lagrange multiplier from above, so it doesn't dominate the gradients:
             with th.no_grad():
+                self.log_beta.clamp_(max=np.log(1))
                 self.log_llambda.clamp_(max=np.log(1))
 
             # Update target networks

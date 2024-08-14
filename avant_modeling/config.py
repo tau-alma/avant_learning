@@ -1,7 +1,7 @@
 sample_rate = 1/10
 
 low_pass_window_size = 250
-savgol_p = 1
+savgol_p = 0.5
 savgol_k = 3
 savgol_d_k = 3
 

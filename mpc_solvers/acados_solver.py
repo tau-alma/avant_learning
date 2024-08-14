@@ -17,6 +17,9 @@ class AcadosSolver:
         self.time_steps = np.tile(self.sample_time, self.N+1)
         self.tf = self.time_steps.sum()
 
+        self.input_delay = problem.input_delay
+        self.delay_compensation_f = None
+
         self.n_controls = 0
         self.n_states = 0
         self.n_params = 0
@@ -50,6 +53,14 @@ class AcadosSolver:
         self.ocp.model.f_expl_expr = problem.dynamics_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
         x_dot = cs.MX.sym("xdot", problem.ocp_x.size())
         self.ocp.model.f_impl_expr = x_dot - self.ocp.model.f_expl_expr
+
+        # Ugly way to write delay comp, using RK4, could probably use the integrator of the acadosOcp instead?
+        k1 = problem.dynamics_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
+        k2 = problem.dynamics_fun(problem.ocp_x + self.input_delay / 2 * k1, problem.ocp_u, problem.ocp_p) 
+        k3 = problem.dynamics_fun(problem.ocp_x + self.input_delay / 2 * k2, problem.ocp_u, problem.ocp_p)
+        k4 = problem.dynamics_fun(problem.ocp_x + self.input_delay * k3, problem.ocp_u, problem.ocp_p)
+        dynamics = self.input_delay / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        self.delay_compensation_f = cs.Function("delay_comp", [problem.ocp_x, problem.ocp_u, problem.ocp_p], [problem.ocp_x + dynamics])
 
         # State constraints:
         self.ocp.constraints.lbx = problem.lbx_vec
@@ -100,7 +111,7 @@ class AcadosSolver:
         # Stage cost:
         if problem.has_stage_neural_cost:
             self.ocp.cost.cost_type = 'EXTERNAL'
-            neural_cost_state = problem.ocp_x_to_stage_state_fun(problem.ocp_x, problem.ocp_p)
+            neural_cost_state = problem.ocp_x_to_stage_state_fun(problem.ocp_x, problem.ocp_u, problem.ocp_p)
             self.ocp.model.cost_expr_ext_cost = problem.stage_cost_fun(neural_cost_state, problem.ocp_x, problem.ocp_u, problem.stage_cost_params, problem.ocp_p)
         else:
             self.ocp.cost.cost_type = 'NONLINEAR_LS'
@@ -136,7 +147,7 @@ class AcadosSolver:
 
         # Solver settings:
         self.ocp.solver_options.nlp_solver_type = "SQP_RTI"
-        self.ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
+        self.ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
         self.ocp.solver_options.regularize_method = "PROJECT"
         self.ocp.solver_options.tol = 1e-4
         self.ocp.solver_options.print_level = 0
@@ -153,15 +164,22 @@ class AcadosSolver:
         else:
             self.ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
         self.ocp.solver_options.levenberg_marquardt = 1e-4
-        # self.ocp.solver_options.nlp_solver_step_length = 0.25
+        self.ocp.solver_options.nlp_solver_step_length = 0.75
 
         self.acados_solver = AcadosOcpSolver(self.ocp, json_file="acados_ocp.json")
 
     def _shift_horizon(self):
         self.xstar[:-1] = self.xstar[1:]
         self.ustar[:-1] = self.ustar[1:]
+        self.ustar[-1, :] = 0
+
+    def _delay_compensation(self, initial_state):
+        new_state = self.delay_compensation_f(initial_state, np.zeros_like(self.ustar[1]), np.empty(0))
+        new_state = np.asarray(new_state).flatten()
+        return new_state
 
     def solve(self, x_initial: np.ndarray, params: List[np.ndarray]):
+        x_initial = self._delay_compensation(x_initial)
         self.acados_solver.set(0, "lbx", x_initial)
         self.acados_solver.set(0, "ubx", x_initial)
 
@@ -220,7 +238,7 @@ class AcadosSolver:
 
         # Prepare stage cost linearization params:
         if self.problem.get_stage_cost_params_fun is not None:
-            stage_cost_input = self.problem.ocp_x_to_stage_state_fun.map(self.N)(self.xstar[:-1, :].T, stage_params.T).full().T
+            stage_cost_input = self.problem.ocp_x_to_stage_state_fun.map(self.N)(self.xstar[:-1, :].T, self.ustar.T, stage_params.T).full().T
             stage_cost_params = self.problem.get_stage_cost_params_fun(stage_cost_input)
             stage_params = np.c_[stage_params, stage_cost_params]
 

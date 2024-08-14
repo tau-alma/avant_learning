@@ -2,31 +2,27 @@ import gpytorch
 import torch
 
 
-class BatchIndependentGPModel(gpytorch.models.ExactGP):
-    def __init__(self, train_x, train_y, likelihood, output_size):
+class torchGPModel(gpytorch.models.ExactGP):
+    def __init__(self, train_x, train_y, likelihood):
         super().__init__(train_x, train_y, likelihood)
-        self.mean_module = gpytorch.means.ZeroMean(batch_shape=torch.Size([output_size]))
+        self.mean_module = gpytorch.means.ZeroMean()
         self.covar_module = gpytorch.kernels.ScaleKernel(
-            gpytorch.kernels.RBFKernel(ard_num_dims=train_x.shape[1], batch_shape=torch.Size([output_size])),
-            batch_shape=torch.Size([output_size])
+            gpytorch.kernels.RBFKernel(ard_num_dims=train_x.shape[1])
         )
 
     def forward(self, x):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
-        return gpytorch.distributions.MultitaskMultivariateNormal.from_batch_mvn(
-            gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
-        )
+        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 
 class GPModel(torch.nn.Module):
-    def __init__(self, train_x, train_y, device="cuda:0", train_lr=1e-1, train_epochs=150):
+    def __init__(self, train_x, train_y, device="cuda:0", train_lr=1e-1, train_epochs=100):
         super().__init__()
         train_x = train_x.to(device)
         train_y = train_y.to(device)
-        self.output_size = 1
-        self.likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=self.output_size, has_global_noise=False).to(device)
-        self.model = BatchIndependentGPModel(train_x, train_y, self.likelihood, self.output_size).to(device)
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device)
+        self.model = torchGPModel(train_x, train_y, self.likelihood).to(device)
         
         self.likelihood.train()
         self.model.train()
@@ -46,11 +42,14 @@ class GPModel(torch.nn.Module):
         self.likelihood.eval()
         self.model.eval()
 
-        print(f'Actual outputscale: {self.model.covar_module.outputscale}')
-        print(f'Actual covar: {self.model.covar_module.base_kernel.lengthscale}')
-        print(f'Task noise: {torch.nn.functional.softplus(self.likelihood.raw_task_noises)}')
+        self.trained_params = {
+            "sigma_f": self.model.covar_module.outputscale.item(),
+            "lengthscale": self.model.covar_module.base_kernel.lengthscale.detach().cpu().numpy().tolist(),
+            "sigma_n": self.likelihood.noise.item()
+        }
 
     def fantasy_model(self, inputs, outputs):
+        # self.model.get_fantasy_model
         self.model.set_train_data(inputs, outputs, False)
 
     def forward(self, x):

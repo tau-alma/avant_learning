@@ -135,26 +135,23 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         sin_c_d, cos_c_d = desired_goal[:, 2], desired_goal[:, 3]
 
         beta = achieved_goal[:, 4]
-        desired_beta = desired_goal[:, 4]
         dot_beta = achieved_goal[:, 5]
-        desired_dot_beta = desired_goal[:, 5]
         v_f = achieved_goal[:, 6]
-        desired_v_f = desired_goal[:, 6]
         achieved_hdg = np.arctan2(sin_c_a, cos_c_a)
         desired_hdg = np.arctan2(sin_c_d, cos_c_d)
 
         pos_error = np.sqrt(np.sum((achieved_goal[:, :2] - desired_goal[:, :2])**2, axis=1))
         hdg_error_deg = 180/np.pi * np.arctan2(np.sin(achieved_hdg - desired_hdg), np.cos(achieved_hdg - desired_hdg))
-        beta_error_deg = 180/np.pi * np.arctan2(np.sin(beta - desired_beta), np.cos(beta - desired_beta))
-        dot_beta_error_deg = 180/np.pi * (dot_beta - desired_dot_beta)
-        velocity_error = v_f - desired_v_f
+        beta_error_deg = 180/np.pi * beta
+        dot_beta_error_deg = 180/np.pi * dot_beta
+        velocity_error = v_f
 
         reward = np.where(
             (pos_error < 0.1) &
-            (np.abs(hdg_error_deg) < 2.5) #&
-            # (np.abs(beta_error_deg) < 2.5) & 
-            # (np.abs(dot_beta_error_deg) < 2.5) &
-            # (np.abs(velocity_error) < 0.1) 
+            (np.abs(hdg_error_deg) < 2.5) &
+            (np.abs(beta_error_deg) < 5) & 
+            (np.abs(dot_beta_error_deg) < 5) &
+            (np.abs(velocity_error) < 0.1) 
             , np.zeros(len(achieved_goal))
             , -np.ones(len(achieved_goal))
         )
@@ -172,8 +169,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         reward = self.compute_reward(tmp_obs["achieved_goal"], tmp_obs["desired_goal"], info)
         
         # Policy seems to learn an action sequence of [max_a, min_a, max_a, ...] to maintain a constant velocity, this should help encourage 0 acceleration instead:
-        accel_penalty = torch.sum(actions**2, axis=1).cpu().numpy()
-        # reward -= 1e-2 * accel_penalty
+        accel_penalty = 1e-2 * torch.sum(actions**2, axis=1).cpu().numpy()
+        reward -= accel_penalty
 
         terminated = torch.from_numpy(reward > self.reward_target).to(self.states.device)
         truncated = (self.num_steps > self.time_limit_s / self.dynamics.dt)

@@ -19,43 +19,51 @@ data_idx_deriv_delay = [
     (2, False, 0, "omega"),                   # 1
     (3, False, 0, "dot_beta"),                # 2  
     (4, False, 0, "v_f"),                     # 3  
-    (3, True, 0, "dot_dot_beta"),             # 4  
-    (5, False, 0, "steer"),                   # 5 
-    (6, False, 0, "gas"),                     # 6 
+    (4, True, 0, "a_f"),                      # 4
+    (3, True, 0, "dot_dot_beta"),             # 5  
+    (5, False, 0, "steer"),                   # 6 
+    (6, False, 0, "gas"),                     # 7 
     
-    (1, False, 1, "truncated_beta_1"),        # 7
-    (4, False, 1, "truncated_v_f_1"),         # 8
-    (6, False, -1, "delayed_gas_1"),          # 9
+    (1, False, 3, "truncated_beta_1"),        # 8
+    (3, False, 3, "truncated_dot_beta_1"),    # 9
+    (4, False, 3, "truncated_v_f_1"),         # 10
+    (6, False, -3, "delayed_gas_1"),          # 11
 
-    (1, False, 3, "truncated_beta_3"),        # 10
-    (4, False, 3, "truncated_v_f_3"),         # 11
-    (3, False, 3, "truncated_dot_beta_3"),    # 12
-    (5, False, -3, "delayed_steer_3"),        # 13
+    (1, False, 3, "truncated_beta_3"),        # 12
+    (3, False, 3, "truncated_dot_beta_3"),    # 13
+    (4, False, 3, "truncated_v_f_3"),         # 14
+    (5, False, -3, "delayed_steer_3"),        # 15
 
-    (3, True, 3, "truncated_dot_dot_beta_3"), # 14 
-    (5, True, -3, "delayed_dot_steer_3"),     # 15 
+    (3, True, 3, "truncated_dot_dot_beta_3"), # 16 
+    (5, True, -3, "delayed_dot_steer_3"),     # 17 
+
+    (4, True, 3, "truncated_a_f_1"),          # 18
+    (6, True, -3, "delayed_dot_gas_1")        # 19
+
 ]
 
 def compute_nominal_values(input_values, name):
     if "omega_f" in name:
         nominal = -(config.avant_lr * input_values[:, 2] + input_values[:, 3] * torch.sin(input_values[:, 0])) / (config.avant_lf * torch.cos(input_values[:, 0]) + config.avant_lr)
     elif "v_f" in name:
-        nominal = 3*input_values[:, 9]
+        nominal = 3*input_values[:, 11]
     elif any(val in name for val in ["dot_beta", "dot_dot_beta", "u_steer"]):
         a = 0.127 # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
         b = 0.495 # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
         eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
-        eps = eps0 - input_values[:, 10]
+        eps = eps0 - input_values[:, 12]
         # control signal gain (k) = the equation (6) page (3) in the paper
         k = 10 * a * b * torch.sin(eps) / torch.sqrt(a**2 + b**2 - 2*a*b*torch.cos(eps))
         if "dot_dot_beta" in name:
-            nominal = (input_values[:, 15] * k) / k**2
+            nominal = (input_values[:, 17] * k) / k**2
         elif "dot_beta" in name:
-            nominal = input_values[:, 13] / k
+            nominal = input_values[:, 15] / k
         elif "u_steer" in name:
-            nominal = k * input_values[:, 12]
+            nominal = k * input_values[:, 13]
     elif "u_gas" in name:
-        nominal = input_values[:, 8] / 3
+        nominal = input_values[:, 10] / 3
+    elif "a_f" in name:
+        nominal = 3*input_values[:, 19]
     return nominal
 
 if __name__ == '__main__':
@@ -80,12 +88,14 @@ if __name__ == '__main__':
 
     gp_datas = [
         (["beta", "dot beta", "v_f"], "omega_f", [0, 2, 3], 1),
-        (["truncated_beta", "delayed_gas"], "truncated_v_f", [7, 9], 8),
-        (["truncated_beta", "truncated_v_f", "delayed_steer"], "truncated_dot_beta", [10, 11, 13], 12),
-        (["truncated_beta", "truncated_dot_beta", "delayed_steer", "delayed_dot_steer"], "truncated_dot_dot_beta", [10, 12, 13, 15], 14),
+        (["truncated_beta", "truncated_dot_beta", "delayed_u_gas"], "truncated_v_f", [8, 9, 11], 10),
+        (["truncated_beta", "truncated_v_f", "delayed_u_steer"], "truncated_dot_beta", [12, 14, 15], 13),
+        (["truncated_beta", "truncated_dot_beta", "delayed_u_steer", "delayed_dot_steer"], "truncated_dot_dot_beta", [12, 13, 15, 17], 16),
 
-        (["truncated_beta", "truncated_dot_beta", "truncated_v_f"], "delayed_u_steer", [10, 12, 11], 13), 
-        (["truncated_beta", "truncated_v_f"], "delayed_u_gas", [7, 8], 9)
+        (["truncated_beta", "truncated_dot_beta", "truncated_v_f"], "delayed_u_steer", [12, 13, 14], 15), 
+        (["truncated_beta", "truncated_dot_beta", "truncated_v_f"], "delayed_u_gas", [8, 9, 10], 11),
+
+        (["truncated_beta", "truncated_v_f", "delayed_u_gas", "delayed_dot_u_gas"], "truncated_a_f", [8, 9, 11, 19], 18)
     ]
 
     # For recreating a rosbag with the model outputs:
@@ -94,9 +104,10 @@ if __name__ == '__main__':
         ("omega", 1),
         ("dot_beta", 2),
         ("v_f", 3),
-        ("dot_dot_beta", 4),
-        ("steer", 5),
-        ("gas", 6),
+        ("a_f", 4),
+        ("dot_dot_beta", 5),
+        ("steer", 6),
+        ("gas", 7)
     ]
     result_bag_datas = {f: {
         "source_data": {},
@@ -111,29 +122,23 @@ if __name__ == '__main__':
         NAME_RESULT_DIR = os.path.join(RESULTS_DIR, output_name)
         os.makedirs(NAME_RESULT_DIR, exist_ok=True)
 
-        # Compute nominal model outputs:
-        nominal = compute_nominal_values(torch.from_numpy(filtered_data), output_name)
-
         # Train GP
+        nominal = compute_nominal_values(torch.from_numpy(filtered_data), output_name)
         gp_inputs = torch.from_numpy(filtered_data[:, input_indices]).to(torch.float).cuda()
-        gp_targets = torch.from_numpy(filtered_data[:, output_i]).to(torch.float).cuda() - nominal[:].to(torch.float).cuda()
-        gp_model = GPModel(gp_inputs, gp_targets, train_epochs=100, train_lr=1e-1)
+        gp_targets = torch.from_numpy(filtered_data[:, output_i]).to(torch.float).cuda()
+        gp_targets -= nominal[:].to(torch.float).cuda()
+        gp_model = GPModel(gp_inputs, gp_targets, train_epochs=200, train_lr=1e-1)
         torch.save(gp_inputs.cpu(), os.path.join(NAME_RESULT_DIR, f"{output_name}_gp_inputs.pth"))
         torch.save(gp_targets.cpu(), os.path.join(NAME_RESULT_DIR, f"{output_name}_gp_targets.pth"))
         torch.save(gp_model.cpu().state_dict(), os.path.join(NAME_RESULT_DIR, f"{output_name}_gp_model.pth"))
-        params = {k: v.cpu().numpy().tolist() for k, v in gp_model.state_dict().items()}
         with open(os.path.join(NAME_RESULT_DIR, f"{output_name}_gp_params.json"), "w") as outfile:
-            outfile.write(json.dumps(params, indent=4))
+            outfile.write(json.dumps(gp_model.trained_params, indent=4))
         gp_model = gp_model.cuda()
-
-        scaler = 1
-        if any (n in output_name for n in ["omega_f", "dot_beta", "dot_dot_beta"]):
-            scaler = 180/np.pi
 
         # Select GP dataset for evaluation by farthest point sampling:
         normalized_data = (filtered_data - np.mean(filtered_data, axis=0)) / (np.std(filtered_data, axis=0))
         # normalized_data = (filtered_data - np.min(filtered_data, axis=0)) / (np.max(filtered_data, axis=0) - np.min(filtered_data, axis=0))
-        selected_idx = farthest_point_sampling(normalized_data[:, input_indices], num_samples=int(2500))
+        selected_idx = farthest_point_sampling(normalized_data[:, input_indices], num_samples=int(len(filtered_data)))
         plot_sample_data(filtered_data, selected_idx, os.path.join(NAME_RESULT_DIR, f"{output_name}_gp_samples.png"))
 
         # For error density plot:
@@ -150,7 +155,7 @@ if __name__ == '__main__':
             with torch.no_grad():
                 gp_model.fantasy_model(gp_inputs[selected_idx], gp_targets[selected_idx])
                 gp_outputs = gp_model(gp_eval_inputs)
-            mean = gp_outputs.mean.cpu().numpy()[:, 0]
+            mean = gp_outputs.mean.cpu().numpy()
             nominal = compute_nominal_values(torch.from_numpy(original_data), output_name).numpy()
             mean += nominal
 
@@ -167,6 +172,9 @@ if __name__ == '__main__':
             result_bag_datas[file]["nominal_outputs"][output_name] = (timestamps[output_i], nominal)
             result_bag_datas[file]["corrected_outputs"][output_name] = (timestamps[output_i], mean)
 
+            scaler = 1
+            if any (n in output_name for n in ["omega_f", "dot_beta", "dot_dot_beta"]):
+                scaler = 180/np.pi
             nominal_error = np.abs(scaler*original_data[:, output_i] - scaler*nominal)
             gp_error = np.abs(scaler*original_data[:, output_i] - scaler*mean)
             nominal_errors.extend(nominal_error)
