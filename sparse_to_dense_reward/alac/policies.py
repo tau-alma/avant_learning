@@ -16,7 +16,7 @@ from stable_baselines3.common.torch_layers import (
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 
-from sparse_to_dense_reward.lac.utils import SquaredContinuousCritic
+from sparse_to_dense_reward.alac.utils import LyapunovCritic
 
 
 # CAP the standard deviation of the actor
@@ -179,7 +179,7 @@ class Actor(BasePolicy):
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         return self(observation, deterministic)
 
-class LACPolicy(BasePolicy):
+class ALACPolicy(BasePolicy):
     """
     Policy class (with both actor and critic) for LAC.
 
@@ -203,20 +203,20 @@ class LACPolicy(BasePolicy):
         ``th.optim.Adam`` by default
     :param optimizer_kwargs: Additional keyword arguments,
         excluding the learning rate, to pass to the optimizer
-    :param n_critics: Number of critic networks to create.
     :param share_features_extractor: Whether to share or not the features extractor
         between the actor and the critic (this saves computation time)
     """
 
     actor: Actor
-    critic: SquaredContinuousCritic
-    critic_target: SquaredContinuousCritic
+    critic: LyapunovCritic
+    critic_target: LyapunovCritic
 
     def __init__(
         self,
         observation_space: spaces.Space,
         action_space: spaces.Box,
         lr_schedule: Schedule,
+        num_critic_out: int,
         net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
         use_sde: bool = False,
@@ -228,7 +228,6 @@ class LACPolicy(BasePolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 2,
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -268,9 +267,9 @@ class LACPolicy(BasePolicy):
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
             {
-                "n_critics": n_critics,
                 "net_arch": critic_arch,
                 "share_features_extractor": share_features_extractor,
+                "num_out": num_critic_out
             }
         )
 
@@ -321,7 +320,6 @@ class LACPolicy(BasePolicy):
                 log_std_init=self.actor_kwargs["log_std_init"],
                 use_expln=self.actor_kwargs["use_expln"],
                 clip_mean=self.actor_kwargs["clip_mean"],
-                n_critics=self.critic_kwargs["n_critics"],
                 lr_schedule=self._dummy_schedule,  # dummy lr schedule, not needed for loading policy alone
                 optimizer_class=self.optimizer_class,
                 optimizer_kwargs=self.optimizer_kwargs,
@@ -343,9 +341,9 @@ class LACPolicy(BasePolicy):
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
         return Actor(**actor_kwargs).to(self.device)
 
-    def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> SquaredContinuousCritic:
+    def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> LyapunovCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
-        return SquaredContinuousCritic(**critic_kwargs).to(self.device)
+        return LyapunovCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         return self._predict(obs, deterministic=deterministic)
@@ -366,7 +364,7 @@ class LACPolicy(BasePolicy):
         self.training = mode
 
 
-class MultiInputPolicy(LACPolicy):
+class MultiInputPolicy(ALACPolicy):
     """
     Policy class (with both actor and critic) for LAC.
 
@@ -388,7 +386,6 @@ class MultiInputPolicy(LACPolicy):
         ``th.optim.Adam`` by default
     :param optimizer_kwargs: Additional keyword arguments,
         excluding the learning rate, to pass to the optimizer
-    :param n_critics: Number of critic networks to create.
     :param share_features_extractor: Whether to share or not the features extractor
         between the actor and the critic (this saves computation time)
     """
@@ -398,6 +395,7 @@ class MultiInputPolicy(LACPolicy):
         observation_space: spaces.Space,
         action_space: spaces.Box,
         lr_schedule: Schedule,
+        num_critic_out: int,
         net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
         use_sde: bool = False,
@@ -409,13 +407,13 @@ class MultiInputPolicy(LACPolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 2,
-        share_features_extractor: bool = False,
+        share_features_extractor: bool = False
     ):
         super().__init__(
             observation_space,
             action_space,
             lr_schedule,
+            num_critic_out,
             net_arch,
             activation_fn,
             use_sde,
@@ -427,6 +425,5 @@ class MultiInputPolicy(LACPolicy):
             normalize_images,
             optimizer_class,
             optimizer_kwargs,
-            n_critics,
             share_features_extractor,
         )

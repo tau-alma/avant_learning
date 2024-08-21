@@ -12,13 +12,13 @@ from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 
-from sparse_to_dense_reward.lac.policies import Actor, LACPolicy, MultiInputPolicy
-from sparse_to_dense_reward.lac.utils import SquaredContinuousCritic
+from sparse_to_dense_reward.alac.policies import Actor, ALACPolicy, MultiInputPolicy
+from sparse_to_dense_reward.alac.utils import LyapunovCritic
 
-SelfLAC = TypeVar("SelfLAC", bound="LAC")
+SelfALAC = TypeVar("SelfALAC", bound="ALAC")
 
 
-class LAC(OffPolicyAlgorithm):
+class ALAC(OffPolicyAlgorithm):
     """
     Lyapunov Actor Critic
 
@@ -74,14 +74,14 @@ class LAC(OffPolicyAlgorithm):
         "MultiInputPolicy": MultiInputPolicy,
     }
 
-    policy: LACPolicy
+    policy: ALACPolicy
     actor: Actor
-    critic: SquaredContinuousCritic
-    critic_target: SquaredContinuousCritic
+    critic: LyapunovCritic
+    critic_target: LyapunovCritic
 
     def __init__(
         self,
-        policy: Union[str, Type[LACPolicy]],
+        policy: Union[str, Type[ALACPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 3e-4,
         buffer_size: int = 1_000_000,  # 1e6
@@ -106,8 +106,7 @@ class LAC(OffPolicyAlgorithm):
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
-        _init_setup_model: bool = True,
-        alpha3: float = 1e-2
+        _init_setup_model: bool = True
     ):
         super().__init__(
             policy,
@@ -140,7 +139,6 @@ class LAC(OffPolicyAlgorithm):
         self.target_update_interval = target_update_interval
         self.target_entropy = target_entropy
     
-        self.alpha3 = alpha3
         # Optimizers for the lyapunov loss lagrange variables:
         self.log_beta = th.tensor([1.0], device=self.device).requires_grad_(True)
         self.beta_optimizer: Optional[th.optim.Adam] = None
@@ -202,9 +200,8 @@ class LAC(OffPolicyAlgorithm):
 
             # Select action according to policy
             next_actions_pi, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
-            # Compute the next L values: max over all critics targets
-            next_L_values = th.cat(self.critic_target(replay_data.next_observations, next_actions_pi), dim=1)
-            next_L_values, _ = th.max(next_L_values, dim=1, keepdim=True)
+            # Compute the next L values
+            next_L_values = self.critic_target(replay_data.next_observations, next_actions_pi)
             
             # td error
             target_L_values = -replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_L_values.detach()
@@ -214,7 +211,7 @@ class LAC(OffPolicyAlgorithm):
             current_L_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
-            critic_loss = 0.5 * sum(F.mse_loss(current_L, target_L_values) for current_L in current_L_values)
+            critic_loss = 0.5 * F.mse_loss(current_L_values, target_L_values)
             assert isinstance(critic_loss, th.Tensor)  # for type checker
             critic_losses.append(critic_loss.item())  # type: ignore[union-attr]
 
@@ -227,28 +224,27 @@ class LAC(OffPolicyAlgorithm):
             beta = th.exp(self.log_beta)
             llambda = th.exp(self.log_llambda)
 
-            current_L_tensor = th.cat(current_L_values, dim=1)
-            max_current_L, _ = th.max(current_L_tensor, dim=1, keepdim=True)
+            k = 1 - llambda.detach().item()
+            lam = min(llambda.detach().item(), self.gamma)
+            delta_L = next_L_values - current_L_values.detach() + k*(current_L_values.detach() - lam*next_L_values)
 
             # Compute actor loss, i.e. solve the inner min problem of the lagrangian:
             actor_loss = th.mean(
                 beta.detach()*log_prob
                 + llambda.detach()*next_L_values
-                # + (1 - beta.detach()) * (1 - llambda.detach()) * max_qf_pi
             )
             self.actor.optimizer.zero_grad()
             actor_loss.backward()
             self.actor.optimizer.step()
             actor_losses.append(actor_loss.item())
 
-            # Compute the lagrange multiplier loss(es), i.e. solve the outer max problem of the lagrangian:
             beta_loss = -beta * th.mean(self.target_entropy + log_prob.detach())
             self.beta_optimizer.zero_grad()
             beta_loss.backward()
             self.beta_optimizer.step()
             beta_losses.append(beta_loss.item())
             
-            llambda_loss = -llambda * th.mean(next_L_values.detach() - max_current_L.detach() + self.alpha3*max_current_L.detach())
+            llambda_loss = -llambda * th.mean(delta_L.detach())
             self.llambda_optimizer.zero_grad()
             llambda_loss.backward()
             self.llambda_optimizer.step()
@@ -275,16 +271,18 @@ class LAC(OffPolicyAlgorithm):
         self.logger.record("train/lambda_loss", np.mean(llambda_losses))
         self.logger.record("train/beta", th.exp(self.log_beta).cpu().detach().item())
         self.logger.record("train/lambda", th.exp(self.log_llambda).cpu().detach().item())
+        self.logger.record("train/k", k)
+        self.logger.record("train/lam", lam)
 
     def learn(
-        self: SelfLAC,
+        self: SelfALAC,
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 4,
-        tb_log_name: str = "LAC",
+        tb_log_name: str = "ALAC",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfLAC:
+    ) -> SelfALAC:
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,

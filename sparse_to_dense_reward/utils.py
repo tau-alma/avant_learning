@@ -99,16 +99,12 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         achieved_hdg_data = achieved[:, 2:4]
         desired_hdg_data = desired[:, 2:4]
 
-        encoded_tensor_list = [pos_residual, achieved_hdg_data, desired_hdg_data, obs]
-        
-        try:
-            retval = torch.cat(encoded_tensor_list, dim=1)
-        except:
-            for t in encoded_tensor_list:
-                print(t.shape)
-            raise RuntimeError("noped out")
-        
-        return retval
+        encoded_tensor_list = [pos_residual, achieved_hdg_data, desired_hdg_data, achieved[:, 4:7]] #, obs]
+        encoded_tensor_list = torch.cat(encoded_tensor_list, dim=1)
+
+        goal_delta = desired - achieved
+
+        return encoded_tensor_list, goal_delta
 
 
 def rotate_image(image, angle, p_rot):

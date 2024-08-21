@@ -197,8 +197,8 @@ class AvantDynamics:
                 omega_f,
                 dot_beta,
 
-                (dot_beta - x_values[:, self.dot_beta_idx]) / self.dt, # dot_beta
-                (v_f - x_values[:, self.v_f_idx]) / self.dt,           # a_f
+                (dot_beta - x_values[:, self.dot_beta_idx]) / self.dt,                              # dot_beta
+                (v_f - x_values[:, self.v_f_idx]) / self.dt,                                        # a_f
 
                 (x_values[:, self.steer_del2_idx] - x_values[:, self.steer_del3_idx]) / self.dt,    # del_steer3
                 (x_values[:, self.steer_del1_idx] - x_values[:, self.steer_del2_idx]) / self.dt,    # del_steer2

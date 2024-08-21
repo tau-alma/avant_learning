@@ -64,7 +64,6 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         self.goals = torch.empty([num_envs, 3]).to(device)
         self.states = torch.empty([num_envs, len(self.dynamics.lbx)]).to(device)
         self.num_steps = torch.zeros(num_envs).to(device)
-        self.reward_target = -1e-1
 
         # Define initial pose and goal pose sampling distribution:
         lb_initial = torch.tensor([-POSITION_BOUND, -POSITION_BOUND, 0]*2, dtype=torch.float32).to(device)
@@ -117,8 +116,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         v_f = states[:, self.dynamics.v_f_idx].cpu().numpy()
 
         return (
-            np.c_[x_f, y_f, s_theta_f, c_theta_f, beta, v_f, dot_beta], 
-            np.c_[x_goal, y_goal, s_theta_goal, c_theta_goal, np.zeros_like(beta), np.zeros_like(v_f), np.zeros_like(dot_beta)]
+            np.c_[x_f, y_f, s_theta_f, c_theta_f, beta, dot_beta, v_f], 
+            np.c_[x_goal, y_goal, s_theta_goal, c_theta_goal, np.zeros_like(beta), np.zeros_like(dot_beta), np.zeros_like(v_f)]
         )
 
     def _construct_observation(self):
@@ -129,8 +128,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             "observation": self._observe(self.states)
         }
         return obs
-
-    def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict]) -> float:
+    
+    def _check_done_condition(self, achieved_goal: np.ndarray, desired_goal: np.ndarray):
         sin_c_a, cos_c_a = achieved_goal[:, 2], achieved_goal[:, 3]
         sin_c_d, cos_c_d = desired_goal[:, 2], desired_goal[:, 3]
 
@@ -139,19 +138,24 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         v_f = achieved_goal[:, 6]
         achieved_hdg = np.arctan2(sin_c_a, cos_c_a)
         desired_hdg = np.arctan2(sin_c_d, cos_c_d)
-
+    
         pos_error = np.sqrt(np.sum((achieved_goal[:, :2] - desired_goal[:, :2])**2, axis=1))
         hdg_error_deg = 180/np.pi * np.arctan2(np.sin(achieved_hdg - desired_hdg), np.cos(achieved_hdg - desired_hdg))
         beta_error_deg = 180/np.pi * beta
         dot_beta_error_deg = 180/np.pi * dot_beta
         velocity_error = v_f
 
-        reward = np.where(
+        return (
             (pos_error < 0.1) &
             (np.abs(hdg_error_deg) < 2.5) &
             (np.abs(beta_error_deg) < 5) & 
             (np.abs(dot_beta_error_deg) < 5) &
             (np.abs(velocity_error) < 0.1) 
+        )
+
+    def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict]) -> float:
+        reward = np.where(
+            self._check_done_condition(achieved_goal, desired_goal)
             , np.zeros(len(achieved_goal))
             , -np.ones(len(achieved_goal))
         )
@@ -171,8 +175,11 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         # Policy seems to learn an action sequence of [max_a, min_a, max_a, ...] to maintain a constant velocity, this should help encourage 0 acceleration instead:
         accel_penalty = 1e-2 * torch.sum(actions**2, axis=1).cpu().numpy()
         reward -= accel_penalty
+        # We want to minimize janky movements, where the policy tries to zero out the beta angle only when standing still at the goal position
+        standstill_turn_penalty = ((1 - torch.tanh(self.states[:, self.dynamics.v_f_idx]**2 / 0.05)) * 1e1*self.states[:, self.dynamics.dot_beta_idx]**2).cpu().numpy()
+        reward -= standstill_turn_penalty
 
-        terminated = torch.from_numpy(reward > self.reward_target).to(self.states.device)
+        terminated = torch.from_numpy(self._check_done_condition(tmp_obs["achieved_goal"], tmp_obs["desired_goal"])).to(self.num_steps.device)
         truncated = (self.num_steps > self.time_limit_s / self.dynamics.dt)
         done = terminated | truncated
 
@@ -180,12 +187,14 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         done_indices = torch.argwhere(done).flatten()
         if len(done_indices) > 0:
             trunc_not_term = (truncated & ~terminated).cpu().numpy()
+            term_not_trunc = (terminated & ~truncated).cpu().numpy()
             for i, done_idx in enumerate(done_indices):
                 terminal_obs_dict = {}
                 for key, value in tmp_obs.items():
                     terminal_obs_dict[key] = value[done_idx]
                 info[done_idx]["terminal_observation"] = terminal_obs_dict
                 info[done_idx]["TimeLimit.truncated"] = trunc_not_term[i]
+                info[done_idx]["is_success"] = term_not_trunc[i]
             # Reset done envs:
             self._internal_reset(done_indices)
 
@@ -241,7 +250,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
 
         return self._construct_observation()
 
-    def render(self, indices: List[int] = [0, 1], mode='rgb_array', horizon: np.ndarray = np.array([])):
+    def render(self, indices: List[int] = [0, 1], mode='rgb_array', obstacles: np.ndarray = np.array([]), horizon: np.ndarray = np.array([])):
         if len(horizon):
             assert len(horizon.shape) == 2 and horizon.shape[1] == 4, "Horizon should be (N, 4) array"
 
@@ -305,6 +314,14 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             pygame.draw.circle(surf, RED, 
                                center=(center + pos_to_pixel_scaler*(x_goal[i]), center + pos_to_pixel_scaler*(y_goal[i])),
                                radius=5)
+
+            # During evaluation, draw the obstacles, if provided:
+            if len(obstacles):
+                for j in range(len(obstacles)):
+                    x_o, y_o, r_o = obstacles[j]
+                    pygame.draw.circle(draw_surf, BLACK,
+                                    center=(center + pos_to_pixel_scaler*(x_o), center + pos_to_pixel_scaler*(y_o)),
+                                    radius=pos_to_pixel_scaler*r_o)
 
             # During evaluation, draw the prediction horizon, if provided:
             if len(horizon):
