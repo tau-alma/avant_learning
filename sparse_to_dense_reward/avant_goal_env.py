@@ -8,24 +8,11 @@ from typing import List, Tuple
 from gymnasium import spaces
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvStepReturn
 from sparse_to_dense_reward.avant_dynamics import AvantDynamics
-from sparse_to_dense_reward.utils import rotate_image, GoalEnv
+from sparse_to_dense_reward.utils import GoalEnv, AvantRenderer
 
 POSITION_BOUND = 5
 
-BLACK = (0, 0, 0)
-WHITE = (255, 255, 255)
-RED = (255, 0, 0)
-GREEN = (0, 255, 0)
-BROWN = (150, 75, 0)
-
-HALF_MACHINE_WIDTH = 0.6
-HALF_MACHINE_LENGTH = 1.3
-MACHINE_RADIUS = 0.8
-
-
 class AvantGoalEnv(VecEnv, GoalEnv):
-    RENDER_RESOLUTION = 1024
-
     def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, eval=False):
         self.num_envs = num_envs
         self.time_limit_s = time_limit_s
@@ -72,23 +59,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
 
         # For rendering:
         self.render_mode = "rgb_array"
-        pygame.init()
-        self.screen = pygame.Surface((self.RENDER_RESOLUTION, self.RENDER_RESOLUTION))
-        pos_to_pixel_scaler = self.RENDER_RESOLUTION / (4*POSITION_BOUND)
-        # Drawing avant:
-        avant_image_pixel_scaler = np.mean([452 / 1.29, 428 / 1.29])
-        avant_scale_factor = pos_to_pixel_scaler / avant_image_pixel_scaler
-        self.front_center_offset = np.array([215, 430]) * avant_scale_factor
-        self.rear_center_offset = np.array([226, 0]) * avant_scale_factor
-        front_image = pygame.image.load('sparse_to_dense_reward/front.png')
-        rear_image = pygame.image.load('sparse_to_dense_reward/rear.png')
-        self.front_image = pygame.transform.scale(front_image, (avant_scale_factor*front_image.get_width(), avant_scale_factor*front_image.get_height()))
-        self.rear_image = pygame.transform.scale(rear_image, (avant_scale_factor*rear_image.get_width(), avant_scale_factor*rear_image.get_height()))
-        front_gray_image = pygame.image.load('sparse_to_dense_reward/front_gray.png')
-        rear_gray_image = pygame.image.load('sparse_to_dense_reward/rear_gray.png')
-        self.front_gray_image = pygame.transform.scale(front_gray_image, (avant_scale_factor*front_gray_image.get_width(), avant_scale_factor*front_gray_image.get_height()))
-        self.rear_gray_image = pygame.transform.scale(rear_gray_image, (avant_scale_factor*rear_gray_image.get_width(), avant_scale_factor*rear_gray_image.get_height()))
-
+        self.renderer = AvantRenderer(POSITION_BOUND)
         # For "fake" vectorization (done within the env already)
         self.returns = None
 
@@ -250,119 +221,19 @@ class AvantGoalEnv(VecEnv, GoalEnv):
 
         return self._construct_observation()
 
-    def render(self, indices: List[int] = [0, 1], mode='rgb_array', obstacles: np.ndarray = np.array([]), horizon: np.ndarray = np.array([])):
+    def render(self, indices: List[int] = [0, 1], mode='rgb_array', horizon: np.ndarray = np.array([]), obstacles: np.ndarray = np.array([])):
         if len(horizon):
             assert len(horizon.shape) == 2 and horizon.shape[1] == 4, "Horizon should be (N, 4) array"
-
-        x_f = self.states[indices, self.dynamics.x_f_idx].cpu().numpy()
-        y_f = self.states[indices, self.dynamics.y_f_idx].cpu().numpy()
-        theta_f = self.states[indices, self.dynamics.theta_f_idx].cpu().numpy()
-        betas = self.states[indices, self.dynamics.beta_idx].cpu().numpy()
-        x_goal = self.goals[indices, 0].cpu().numpy()
-        y_goal = self.goals[indices, 1].cpu().numpy()
-        theta_goal = self.goals[indices, 2].cpu().numpy()
-
-        center = self.RENDER_RESOLUTION // 2
-        pos_to_pixel_scaler = self.RENDER_RESOLUTION / (4*POSITION_BOUND)
+        if len(obstacles):
+            assert len(horizon.shape) == 2 and horizon.shape[1] == 4, "Obstacles should be (N, 4) array"
         
-        frames = np.empty([len(indices), self.RENDER_RESOLUTION, self.RENDER_RESOLUTION, 3])
+        frames = []
         for i in range(len(indices)):
-            surf = pygame.Surface((self.RENDER_RESOLUTION, self.RENDER_RESOLUTION))
-            surf.fill(WHITE)
-
-            alpha_surf = pygame.Surface((self.RENDER_RESOLUTION, self.RENDER_RESOLUTION))
-            alpha_surf.set_alpha(72)
-            alpha_surf.fill(WHITE)
-
-            # Visualizing avant front collision bound:
-            pygame.draw.circle(alpha_surf, RED, 
-                               center=(center + pos_to_pixel_scaler*(x_f[i]), center + pos_to_pixel_scaler*(y_f[i])),
-                               radius=pos_to_pixel_scaler*MACHINE_RADIUS)
-            
-            # Visualizing avant rear collision bound:
-            x_off = pos_to_pixel_scaler*(
-                x_f[i] 
-                - np.cos(theta_f[i]) * np.cos(betas[i]/4)*HALF_MACHINE_LENGTH/2 
-                - np.sin(theta_f[i]) * np.sin(betas[i]/4)*HALF_MACHINE_LENGTH/2 
-                - np.cos(-theta_f[i] - betas[i]) * HALF_MACHINE_LENGTH/2 
-            )
-            y_off = pos_to_pixel_scaler*(
-                y_f[i] 
-                - np.sin(theta_f[i]) * np.cos(betas[i]/4)*HALF_MACHINE_LENGTH/2 
-                + np.cos(theta_f[i]) * np.sin(betas[i]/4)*HALF_MACHINE_LENGTH/2 
-                + np.sin(-theta_f[i] - betas[i]) * HALF_MACHINE_LENGTH/2 
-            )
-            pygame.draw.circle(alpha_surf, RED, 
-                               center=(center + x_off, center + y_off),
-                               radius=pos_to_pixel_scaler*MACHINE_RADIUS)
-
-            # Black magic to shift the avant frame images correctly given the kinematics:
-            x_off = pos_to_pixel_scaler*(
-                x_goal[i] - np.cos(theta_goal[i]) * HALF_MACHINE_LENGTH/2
-            )
-            y_off = pos_to_pixel_scaler*(
-                y_goal[i] - np.sin(theta_goal[i]) * HALF_MACHINE_LENGTH/2 
-            )
-            rotated_image, final_position = rotate_image(self.rear_gray_image, np.rad2deg(theta_goal[i] + np.pi/2), self.rear_center_offset.tolist())
-            surf.blit(rotated_image, 
-                           (center + x_off - final_position[0], 
-                            center + y_off - final_position[1]))
-            rotated_image, final_position = rotate_image(self.front_gray_image, np.rad2deg(theta_goal[i] + np.pi/2), self.front_center_offset.tolist())
-            surf.blit(rotated_image, 
-                           (center + x_off - final_position[0], 
-                            center + y_off - final_position[1]))
-            pygame.draw.circle(surf, RED, 
-                               center=(center + pos_to_pixel_scaler*(x_goal[i]), center + pos_to_pixel_scaler*(y_goal[i])),
-                               radius=5)
-
-            # During evaluation, draw the obstacles, if provided:
-            if len(obstacles):
-                for j in range(len(obstacles)):
-                    x_o, y_o, r_o = obstacles[j]
-                    pygame.draw.circle(draw_surf, BLACK,
-                                    center=(center + pos_to_pixel_scaler*(x_o), center + pos_to_pixel_scaler*(y_o)),
-                                    radius=pos_to_pixel_scaler*r_o)
-
-            # During evaluation, draw the prediction horizon, if provided:
-            if len(horizon):
-                data = np.r_[np.c_[x_f[i], y_f[i], theta_f[i], betas[i]],
-                             horizon]
-            else:
-                data = np.c_[x_f[i], y_f[i], theta_f[i], betas[i]]
-            for j in range(len(data)):
-                x_f_val, y_f_val, theta_f_val, beta_val = data[j]
-                if j == 0:
-                    draw_surf = surf
-                else:
-                    draw_surf = alpha_surf
-                # Black magic to shift the image correctly given the kinematics:
-                x_off = pos_to_pixel_scaler*(
-                    x_f_val - np.cos(theta_f_val) * np.cos(beta_val/4)*HALF_MACHINE_LENGTH/2 
-                    - np.sin(theta_f_val) * np.sin(beta_val/4)*HALF_MACHINE_LENGTH/2 
-                )
-                y_off = pos_to_pixel_scaler*(
-                    y_f_val - np.sin(theta_f_val) * np.cos(beta_val/4)*HALF_MACHINE_LENGTH/2 
-                    + np.cos(theta_f_val) * np.sin(beta_val/4)*HALF_MACHINE_LENGTH/2 
-                )
-                rotated_image, final_position = rotate_image(self.rear_image, np.rad2deg(theta_f_val + beta_val + np.pi/2), self.rear_center_offset.tolist())
-                draw_surf.blit(rotated_image, 
-                            (center + x_off - final_position[0], 
-                                center + y_off - final_position[1]))
-                rotated_image, final_position = rotate_image(self.front_image, np.rad2deg(theta_f_val + np.pi/2), self.front_center_offset.tolist())
-                draw_surf.blit(rotated_image, 
-                            (center + x_off - final_position[0], 
-                                center + y_off - final_position[1]))
-                pygame.draw.circle(draw_surf, RED,
-                                   center=(center + pos_to_pixel_scaler*(x_f_val), center + pos_to_pixel_scaler*(y_f_val)),
-                                   radius=5)
-            
-            self.screen.blits([
-                (surf, (0, 0)),
-                (alpha_surf, (0, 0))
-            ])
-            buffer = pygame.transform.flip(self.screen, True, False)
-            buffer = pygame.surfarray.array3d(buffer)
-            frames[i] = buffer # SHOULD BE: (512, 1024, 3), by concatting buffer and bw frame converted to color bw
+            frames.append(self.renderer.render(
+                self.states[i, :4].cpu().numpy(),
+                self.goals[i, :3].cpu().numpy(),
+                horizon, obstacles
+            ))
         return np.concatenate(frames, axis=1)
     
     def close(self) -> None:

@@ -7,9 +7,7 @@ from torch import nn
 from stable_baselines3.common.preprocessing import get_flattened_obs_dim, is_image_space
 from stable_baselines3.common.type_aliases import TensorDict
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.policies import ContinuousCritic
-from stable_baselines3.sac.policies import MultiInputPolicy
-from typing import Dict, List, Type
+from typing import Dict
 
 class GoalEnv(ABC):
     """
@@ -126,3 +124,147 @@ def rotate_image(image, angle, p_rot):
     center_of_rotated = rotated_large_surface.get_rect().center
     
     return rotated_large_surface, center_of_rotated
+
+
+class AvantRenderer:
+    RENDER_RESOLUTION = 1024
+
+    BLACK = (0, 0, 0)
+    WHITE = (255, 255, 255)
+    RED = (255, 0, 0)
+    GREEN = (0, 255, 0)
+    BROWN = (150, 75, 0)
+
+    HALF_MACHINE_WIDTH = 0.6
+    HALF_MACHINE_LENGTH = 1.3
+    MACHINE_RADIUS = 0.8
+
+    def __init__(self, position_bound):
+        self.position_bound = position_bound
+        pos_to_pixel_scaler = self.RENDER_RESOLUTION / (4*position_bound)
+
+        pygame.init()
+        self.screen = pygame.Surface((self.RENDER_RESOLUTION, self.RENDER_RESOLUTION))
+        # Drawing avant:
+        avant_image_pixel_scaler = np.mean([452 / 1.29, 428 / 1.29])
+        avant_scale_factor = pos_to_pixel_scaler / avant_image_pixel_scaler
+        self.front_center_offset = np.array([215, 430]) * avant_scale_factor
+        self.rear_center_offset = np.array([226, 0]) * avant_scale_factor
+        front_image = pygame.image.load('sparse_to_dense_reward/front.png')
+        rear_image = pygame.image.load('sparse_to_dense_reward/rear.png')
+        self.front_image = pygame.transform.scale(front_image, (avant_scale_factor*front_image.get_width(), avant_scale_factor*front_image.get_height()))
+        self.rear_image = pygame.transform.scale(rear_image, (avant_scale_factor*rear_image.get_width(), avant_scale_factor*rear_image.get_height()))
+        front_gray_image = pygame.image.load('sparse_to_dense_reward/front_gray.png')
+        rear_gray_image = pygame.image.load('sparse_to_dense_reward/rear_gray.png')
+        self.front_gray_image = pygame.transform.scale(front_gray_image, (avant_scale_factor*front_gray_image.get_width(), avant_scale_factor*front_gray_image.get_height()))
+        self.rear_gray_image = pygame.transform.scale(rear_gray_image, (avant_scale_factor*rear_gray_image.get_width(), avant_scale_factor*rear_gray_image.get_height()))
+
+
+    def render(self, state: np.ndarray, goal: np.ndarray, horizon: np.ndarray = np.empty([]), obstacles: np.ndarray = np.empty([])):
+        x_f = state[0]
+        y_f = state[1]
+        theta_f = state[2]
+        beta = state[3]
+        x_goal = goal[0]
+        y_goal = goal[1]
+        theta_goal = goal[2]  
+
+        center = self.RENDER_RESOLUTION // 2
+        pos_to_pixel_scaler = self.RENDER_RESOLUTION / (4*self.position_bound)
+
+        surf = pygame.Surface((self.RENDER_RESOLUTION, self.RENDER_RESOLUTION))
+        surf.fill(self.WHITE)
+
+        alpha_surf = pygame.Surface((self.RENDER_RESOLUTION, self.RENDER_RESOLUTION))
+        alpha_surf.set_alpha(72)
+        alpha_surf.fill(self.WHITE)
+
+        # Visualizing avant front collision bound:
+        pygame.draw.circle(alpha_surf, self.RED, 
+                           center=(center + pos_to_pixel_scaler*(x_f), center + pos_to_pixel_scaler*(y_f)),
+                           radius=pos_to_pixel_scaler*self.MACHINE_RADIUS)
+        
+        # Visualizing avant rear collision bound:
+        x_off = pos_to_pixel_scaler*(
+            x_f 
+            - np.cos(theta_f) * np.cos(beta/4)*self.HALF_MACHINE_LENGTH/2 
+            - np.sin(theta_f) * np.sin(beta/4)*self.HALF_MACHINE_LENGTH/2 
+            - np.cos(-theta_f - beta) * self.HALF_MACHINE_LENGTH/2 
+        )
+        y_off = pos_to_pixel_scaler*(
+            y_f 
+            - np.sin(theta_f) * np.cos(beta/4)*self.HALF_MACHINE_LENGTH/2 
+            + np.cos(theta_f) * np.sin(beta/4)*self.HALF_MACHINE_LENGTH/2 
+            + np.sin(-theta_f - beta) * self.HALF_MACHINE_LENGTH/2 
+        )
+        pygame.draw.circle(alpha_surf, self.RED, 
+                           center=(center + x_off, center + y_off),
+                           radius=pos_to_pixel_scaler*self.MACHINE_RADIUS)
+
+        # Black magic to shift the avant frame images correctly given the kinematics:
+        x_off = pos_to_pixel_scaler*(
+            x_goal - np.cos(theta_goal) * self.HALF_MACHINE_LENGTH/2
+        )
+        y_off = pos_to_pixel_scaler*(
+            y_goal - np.sin(theta_goal) * self.HALF_MACHINE_LENGTH/2 
+        )
+        rotated_image, final_position = rotate_image(self.rear_gray_image, np.rad2deg(theta_goal + np.pi/2), self.rear_center_offset.tolist())
+        surf.blit(rotated_image, 
+                       (center + x_off - final_position[0], 
+                        center + y_off - final_position[1]))
+        rotated_image, final_position = rotate_image(self.front_gray_image, np.rad2deg(theta_goal + np.pi/2), self.front_center_offset.tolist())
+        surf.blit(rotated_image, 
+                       (center + x_off - final_position[0], 
+                        center + y_off - final_position[1]))
+        pygame.draw.circle(surf, self.RED, 
+                           center=(center + pos_to_pixel_scaler*(x_goal), center + pos_to_pixel_scaler*(y_goal)),
+                           radius=5)
+
+        # During evaluation, draw the obstacles, if provided:
+        if len(obstacles):
+            for j in range(len(obstacles)):
+                x_o, y_o, r_o = obstacles[j]
+                pygame.draw.circle(draw_surf, self.BLACK,
+                                center=(center + pos_to_pixel_scaler*(x_o), center + pos_to_pixel_scaler*(y_o)),
+                                radius=pos_to_pixel_scaler*r_o)
+
+        # During evaluation, draw the prediction horizon, if provided:
+        if len(horizon):
+            data = np.r_[np.c_[x_f, y_f, theta_f, beta],
+                         horizon]
+        else:
+            data = np.c_[x_f, y_f, theta_f, beta]
+        for j in range(len(data)):
+            x_f_val, y_f_val, theta_f_val, beta_val = data[j]
+            if j == 0:
+                draw_surf = surf
+            else:
+                draw_surf = alpha_surf
+            # Black magic to shift the image correctly given the kinematics:
+            x_off = pos_to_pixel_scaler*(
+                x_f_val - np.cos(theta_f_val) * np.cos(beta_val/4)*self.HALF_MACHINE_LENGTH/2 
+                - np.sin(theta_f_val) * np.sin(beta_val/4)*self.HALF_MACHINE_LENGTH/2 
+            )
+            y_off = pos_to_pixel_scaler*(
+                y_f_val - np.sin(theta_f_val) * np.cos(beta_val/4)*self.HALF_MACHINE_LENGTH/2 
+                + np.cos(theta_f_val) * np.sin(beta_val/4)*self.HALF_MACHINE_LENGTH/2 
+            )
+            rotated_image, final_position = rotate_image(self.rear_image, np.rad2deg(theta_f_val + beta_val + np.pi/2), self.rear_center_offset.tolist())
+            draw_surf.blit(rotated_image, 
+                        (center + x_off - final_position[0], 
+                            center + y_off - final_position[1]))
+            rotated_image, final_position = rotate_image(self.front_image, np.rad2deg(theta_f_val + np.pi/2), self.front_center_offset.tolist())
+            draw_surf.blit(rotated_image, 
+                        (center + x_off - final_position[0], 
+                            center + y_off - final_position[1]))
+            pygame.draw.circle(draw_surf, self.RED,
+                               center=(center + pos_to_pixel_scaler*(x_f_val), center + pos_to_pixel_scaler*(y_f_val)),
+                               radius=5)
+        
+        self.screen.blits([
+            (surf, (0, 0)),
+            (alpha_surf, (0, 0))
+        ])
+        buffer = pygame.transform.flip(self.screen, True, False)
+        buffer = pygame.surfarray.array3d(buffer)
+        return buffer # SHOULD BE: (512, 1024, 3), by concatting buffer and bw frame converted to color bw

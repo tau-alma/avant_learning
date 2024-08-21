@@ -26,12 +26,13 @@ class AvantDynamics:
     u_steer_idx = 0
     u_throttle_idx = 1
 
-    def __init__(self, dt: float, device: str, eval: bool):
-        assert dt == 1/10, "Current model assumes dt = 1/10hz to correctly represent actuator delay"
+    def __init__(self, dt: float, device: str, eval: bool, eval_input_delay: bool = False):
+        assert not eval_input_delay or (eval_input_delay and dt == 1/10), "Current model assumes dt = 1/10hz to correctly represent actuator delay"
 
         self.dt = dt
         self.device = device
         self.eval = eval
+        self.eval_input_delay = eval_input_delay
 
         # Define control normalization constants:
         if not eval:
@@ -52,21 +53,31 @@ class AvantDynamics:
                 config.avant_max_v
             ], dtype=torch.float32).to(device)
         else:
+            if eval_input_delay:
+                self.lbx = torch.tensor([
+                    -torch.inf, -torch.inf, -torch.inf, 
+                    -config.avant_max_beta, -config.avant_max_dot_beta, 
+                    config.avant_min_v,
+                    -1, -1, -1, -1
+                ], dtype=torch.float32).to(device)
+                self.ubx = torch.tensor([
+                    torch.inf, torch.inf, torch.inf, 
+                    config.avant_max_beta, config.avant_max_dot_beta,
+                    config.avant_max_v,
+                    1, 1, 1, 1
+                ], dtype=torch.float32).to(device)
+            else:
+                self.lbx = torch.tensor([
+                    -torch.inf, -torch.inf, -torch.inf, 
+                    -config.avant_max_beta, -config.avant_max_dot_beta, 
+                    config.avant_min_v
+                ], dtype=torch.float32).to(device)
+                self.ubx = torch.tensor([
+                    torch.inf, torch.inf, torch.inf, 
+                    config.avant_max_beta, config.avant_max_dot_beta,
+                    config.avant_max_v
+                ], dtype=torch.float32).to(device)
 
-            self.lbx = torch.tensor([
-                -torch.inf, -torch.inf, -torch.inf, 
-                -config.avant_max_beta, -config.avant_max_dot_beta, 
-                config.avant_min_v,
-                -1, -1, -1, -1
-            ], dtype=torch.float32).to(device)
-            self.ubx = torch.tensor([
-                torch.inf, torch.inf, torch.inf, 
-                config.avant_max_beta, config.avant_max_dot_beta,
-                config.avant_max_v,
-                1, 1, 1, 1
-            ], dtype=torch.float32).to(device)
-        
-        if eval:
             self.gp_dict = {}
             for name in ["omega_f", "truncated_v_f", "truncated_dot_beta"]:
                 data_x = torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_inputs.pth").to(device)
@@ -155,41 +166,58 @@ class AvantDynamics:
         def continuous_dynamics(x_values: torch.Tensor, u_values: torch.Tensor):
             u_values = self.control_scalers * u_values
 
-            # To avoid accumulating beta even at the limits, we scale the dot_beta accordingly:
-            distance_to_limit = config.avant_max_beta - torch.abs(x_values[:, self.beta_idx])
-            scaling_factor = torch.min(distance_to_limit / (torch.abs(x_values[:, self.dot_beta_idx]) * self.dt + 1e-5), torch.tensor(1.0).to(x_values.device))
-
-            # Nominal and GP for omega_f
-            nominal_omega_f = -(
-                (config.avant_lr * scaling_factor * x_values[:, self.dot_beta_idx] + x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.beta_idx])) 
-                / (config.avant_lf * torch.cos(x_values[:, self.beta_idx]) + config.avant_lr)
-            )
             gp_omega_f_inputs = torch.vstack([
                 x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], x_values[:, self.v_f_idx]
             ]).T
             gp_omega_f = self.gp_dict["omega_f"](gp_omega_f_inputs).mean
-            omega_f = nominal_omega_f + gp_omega_f
+            omega_f = gp_omega_f
 
             # Nominal and GP for v_f
-            nominal_v_f = 3 * x_values[:, self.throttle_del1_idx]
             gp_v_f_inputs = torch.vstack([
-                x_values[:, self.beta_idx], x_values[:, self.throttle_del1_idx]
+                x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], u_values[:, self.u_throttle_idx]
             ]).T
             gp_v_f = self.gp_dict["truncated_v_f"](gp_v_f_inputs).mean
-            v_f = nominal_v_f + gp_v_f
+            v_f = gp_v_f
 
             # Nominal and GP for dot_dot_beta        
-            a = 0.127                  # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
-            b = 0.495                  # AFS parameter, check the paper page(1) Figure 1: AFS mechanism
-            eps0 = 1.4049900478554351  # the angle from of the hydraulic sylinder check the paper page(1) Figure (1) 
-            eps = eps0 - x_values[:, self.beta_idx]
-            k = 10 * a * b * np.sin(eps) / np.sqrt(a**2 + b**2 - 2*a*b*np.cos(eps))
-            nominal_dot_beta = x_values[:, self.steer_del3_idx] / k
+            gp_dot_beta_inputs = torch.vstack([
+                x_values[:, self.beta_idx], v_f, u_values[:, self.u_steer_idx]
+            ]).T
+            gp_dot_beta = self.gp_dict["truncated_dot_beta"](gp_dot_beta_inputs).mean
+            dot_beta = gp_dot_beta
+
+            dot_state = torch.vstack([
+                v_f * torch.cos(x_values[:, self.theta_f_idx]),
+                v_f * torch.sin(x_values[:, self.theta_f_idx]),
+                omega_f,
+                dot_beta,
+
+                (dot_beta - x_values[:, self.dot_beta_idx]) / self.dt,                              # dot_beta
+                (v_f - x_values[:, self.v_f_idx]) / self.dt,                                        # a_f
+            ]).T
+            return dot_state
+
+        def delayed_continuous_dynamics(x_values: torch.Tensor, u_values: torch.Tensor):
+            u_values = self.control_scalers * u_values
+
+            gp_omega_f_inputs = torch.vstack([
+                x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], x_values[:, self.v_f_idx]
+            ]).T
+            gp_omega_f = self.gp_dict["omega_f"](gp_omega_f_inputs).rsample(torch.Size([1]))
+            omega_f = gp_omega_f
+
+            # Nominal and GP for v_f
+            gp_v_f_inputs = torch.vstack([
+                x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], x_values[:, self.throttle_del1_idx]
+            ]).T
+            gp_v_f = self.gp_dict["truncated_v_f"](gp_v_f_inputs).rsample(torch.Size([1]))
+            v_f = gp_v_f
+
             gp_dot_beta_inputs = torch.vstack([
                 x_values[:, self.beta_idx], v_f, x_values[:, self.steer_del3_idx]
             ]).T
-            gp_dot_beta = self.gp_dict["truncated_dot_beta"](gp_dot_beta_inputs).mean
-            dot_beta = nominal_dot_beta + gp_dot_beta
+            gp_dot_beta = self.gp_dict["truncated_dot_beta"](gp_dot_beta_inputs).rsample(torch.Size([1]))
+            dot_beta = gp_dot_beta
 
             dot_state = torch.vstack([
                 v_f * torch.cos(x_values[:, self.theta_f_idx]),
@@ -208,8 +236,10 @@ class AvantDynamics:
             ]).T
             return dot_state
 
-        k1 = continuous_dynamics(x_values, u_values)
-        state_delta = self.dt * k1
+        if self.eval_input_delay:
+            state_delta = self.dt * delayed_continuous_dynamics(x_values, u_values)
+        else:
+            state_delta = self.dt * continuous_dynamics(x_values, u_values)
         next_state = x_values + state_delta
 
         # Zero out any center link velocity (going towards the closest joint limit direction) at joint limit
