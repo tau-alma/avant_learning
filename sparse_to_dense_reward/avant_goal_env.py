@@ -10,15 +10,15 @@ from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvStepRetu
 from sparse_to_dense_reward.avant_dynamics import AvantDynamics
 from sparse_to_dense_reward.utils import GoalEnv, AvantRenderer
 
-POSITION_BOUND = 5
+POSITION_BOUND = 10
 
 class AvantGoalEnv(VecEnv, GoalEnv):
-    def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, eval=False):
+    def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str, eval=False, eval_input_delay=False):
         self.num_envs = num_envs
         self.time_limit_s = time_limit_s
         self.device = device
         self.eval = eval
-        self.dynamics = AvantDynamics(dt=dt, device=device, eval=eval)
+        self.dynamics = AvantDynamics(dt=dt, device=device, eval=eval, eval_input_delay=eval_input_delay)
 
         n_actions = len(self.dynamics.control_scalers.cpu().numpy())
         self.single_action_space = spaces.Box(
@@ -49,17 +49,18 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         )
         
         self.goals = torch.empty([num_envs, 3]).to(device)
+        self.start_states = torch.empty([num_envs, len(self.dynamics.lbx)]).to(device)
         self.states = torch.empty([num_envs, len(self.dynamics.lbx)]).to(device)
         self.num_steps = torch.zeros(num_envs).to(device)
 
         # Define initial pose and goal pose sampling distribution:
-        lb_initial = torch.tensor([-POSITION_BOUND, -POSITION_BOUND, 0]*2, dtype=torch.float32).to(device)
-        ub_initial = torch.tensor([POSITION_BOUND, POSITION_BOUND, 2*torch.pi]*2, dtype=torch.float32).to(device)
+        lb_initial = torch.tensor([2.5, 0, 0], dtype=torch.float32).to(device)
+        ub_initial = torch.tensor([POSITION_BOUND, 2*torch.pi, 2*torch.pi], dtype=torch.float32).to(device)
         self.initial_pose_distribution = torch.distributions.uniform.Uniform(lb_initial, ub_initial)
 
         # For rendering:
         self.render_mode = "rgb_array"
-        self.renderer = AvantRenderer(POSITION_BOUND)
+        self.renderer = AvantRenderer(POSITION_BOUND//2 + 1)
         # For "fake" vectorization (done within the env already)
         self.returns = None
 
@@ -99,8 +100,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             "observation": self._observe(self.states)
         }
         return obs
-    
-    def _check_done_condition(self, achieved_goal: np.ndarray, desired_goal: np.ndarray):
+
+    def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict]) -> float:
         sin_c_a, cos_c_a = achieved_goal[:, 2], achieved_goal[:, 3]
         sin_c_d, cos_c_d = desired_goal[:, 2], desired_goal[:, 3]
 
@@ -116,19 +117,15 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         dot_beta_error_deg = 180/np.pi * dot_beta
         velocity_error = v_f
 
-        return (
-            (pos_error < 0.1) &
-            (np.abs(hdg_error_deg) < 2.5) &
-            (np.abs(beta_error_deg) < 5) & 
-            (np.abs(dot_beta_error_deg) < 5) &
-            (np.abs(velocity_error) < 0.1) 
-        )
+        errors = np.c_[pos_error, hdg_error_deg, beta_error_deg, dot_beta_error_deg, velocity_error]
+        weights = np.array([4, 0.2, 0.1, 0.1, 2]) / 10
 
-    def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: List[dict]) -> float:
-        reward = np.where(
-            self._check_done_condition(achieved_goal, desired_goal)
-            , np.zeros(len(achieved_goal))
-            , -np.ones(len(achieved_goal))
+        reward = -np.power(
+            np.dot(
+                np.abs(errors),
+                weights
+            ),
+            1/4,
         )
 
         return reward
@@ -146,11 +143,8 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         # Policy seems to learn an action sequence of [max_a, min_a, max_a, ...] to maintain a constant velocity, this should help encourage 0 acceleration instead:
         accel_penalty = 1e-2 * torch.sum(actions**2, axis=1).cpu().numpy()
         reward -= accel_penalty
-        # We want to minimize janky movements, where the policy tries to zero out the beta angle only when standing still at the goal position
-        standstill_turn_penalty = ((1 - torch.tanh(self.states[:, self.dynamics.v_f_idx]**2 / 0.05)) * 1e1*self.states[:, self.dynamics.dot_beta_idx]**2).cpu().numpy()
-        reward -= standstill_turn_penalty
 
-        terminated = torch.from_numpy(self._check_done_condition(tmp_obs["achieved_goal"], tmp_obs["desired_goal"])).to(self.num_steps.device)
+        terminated = torch.from_numpy(reward > -0.55).to(self.device)
         truncated = (self.num_steps > self.time_limit_s / self.dynamics.dt)
         done = terminated | truncated
 
@@ -166,6 +160,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                 info[done_idx]["terminal_observation"] = terminal_obs_dict
                 info[done_idx]["TimeLimit.truncated"] = trunc_not_term[i]
                 info[done_idx]["is_success"] = term_not_trunc[i]
+
             # Reset done envs:
             self._internal_reset(done_indices)
 
@@ -174,36 +169,19 @@ class AvantGoalEnv(VecEnv, GoalEnv):
         return obs, reward, done.cpu().numpy(), info
 
     def _internal_reset(self, indices: torch.Tensor):
-        N_SAMPLES = self.num_envs*10000
+        N_SAMPLES = len(indices)
+   
+        goal_parameters = self.initial_pose_distribution.sample((N_SAMPLES,))
 
-        # Ensure we have valid initial pose and goal pose locations, if not, resample:
-        envs_left = len(indices)
-        while True:        
-            pose_samples = self.initial_pose_distribution.sample((N_SAMPLES,))
-        
-            # Initial pose should be far enough away from goal pose:
-            i_g_dist = torch.norm(pose_samples[:, :2] - pose_samples[:, 3:5], dim=1)
-            valid_indices = torch.argwhere(
-                (i_g_dist > 0.5)
-            ).flatten()
-
-            # Apply all the valid env samples:
-            n_valid = min(envs_left, len(valid_indices))
-            if n_valid == 0:
-                continue
-            updated_env_indices = indices[:n_valid]
-            np_valid_indices = valid_indices.cpu().numpy()[:n_valid]
-            self.goals[updated_env_indices] = pose_samples[np_valid_indices, 3:6]
-            self.states[updated_env_indices, :3] = pose_samples[np_valid_indices, :3]
-            self.states[updated_env_indices, 3:6] = torch.zeros((n_valid, 3)).to(self.states.device)
-            self.num_steps[updated_env_indices] = 0
-
-            if len(valid_indices) >= envs_left:
-                break
-
-            # Resample the remaining envs:
-            envs_left -= n_valid
-            indices = indices[n_valid:]
+        goals = torch.vstack([
+            goal_parameters[:, 0] * torch.cos(goal_parameters[:, 1]),
+            goal_parameters[:, 0] * torch.sin(goal_parameters[:, 1]),
+            goal_parameters[:, 2]
+        ]).T
+        self.goals[indices] = goals
+        self.states[indices, :6] = torch.zeros((N_SAMPLES, 6)).to(self.states.device)
+        self.start_states[indices] = self.states[indices].clone()
+        self.num_steps[indices] = 0
         
     def reset(self, initial_pose: List[np.ndarray]=None, goal_pose: List[np.ndarray]=None):
         if initial_pose is not None and goal_pose is not None:
@@ -212,7 +190,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
                     assert initial_pose[i].dtype == np.float32 and goal_pose[i].dtype == np.float32
                     self.states[i] = torch.zeros(len(self.dynamics.lbx)).to(self.states.device)
                     self.states[i, :3] = torch.from_numpy(initial_pose[i]).to(self.states.device)
-                    self.states[i, 6:9] = torch.from_numpy(goal_pose[i]).to(self.states.device)
+                    self.goals[i, :3] = torch.from_numpy(goal_pose[i]).to(self.states.device)
                     self.num_steps[i] = 0
             else:
                 raise ValueError("Need initial pose and goal pose for all environments")
@@ -221,7 +199,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
 
         return self._construct_observation()
 
-    def render(self, indices: List[int] = [0, 1], mode='rgb_array', horizon: np.ndarray = np.array([]), obstacles: np.ndarray = np.array([])):
+    def render(self, indices: List[int] = [0, 1], mode='rgb_array', horizon: np.ndarray = np.array([]), obstacles: np.ndarray = np.array([]), comparision: np.ndarray = np.array([])):
         if len(horizon):
             assert len(horizon.shape) == 2 and horizon.shape[1] == 4, "Horizon should be (N, 4) array"
         if len(obstacles):
@@ -232,7 +210,7 @@ class AvantGoalEnv(VecEnv, GoalEnv):
             frames.append(self.renderer.render(
                 self.states[i, :4].cpu().numpy(),
                 self.goals[i, :3].cpu().numpy(),
-                horizon, obstacles
+                horizon, obstacles, comparision
             ))
         return np.concatenate(frames, axis=1)
     

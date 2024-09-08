@@ -12,15 +12,16 @@ from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 
+from sparse_to_dense_reward.utils import compute_gradient_penalty
 from sparse_to_dense_reward.alac.policies import Actor, ALACPolicy, MultiInputPolicy
-from sparse_to_dense_reward.alac.utils import LyapunovCritic
+from sparse_to_dense_reward.alac.utils import SquaredContinuousCritic
 
 SelfALAC = TypeVar("SelfALAC", bound="ALAC")
 
 
 class ALAC(OffPolicyAlgorithm):
     """
-    Lyapunov Actor Critic
+    Adaptive Lyapunov-based Actor Critic
 
     :param policy: The policy model to use (MlpPolicy, CnnPolicy, ...)
     :param env: The environment to learn from (if registered in Gym, can be str)
@@ -76,8 +77,8 @@ class ALAC(OffPolicyAlgorithm):
 
     policy: ALACPolicy
     actor: Actor
-    critic: LyapunovCritic
-    critic_target: LyapunovCritic
+    critic: SquaredContinuousCritic
+    critic_target: SquaredContinuousCritic
 
     def __init__(
         self,
@@ -106,7 +107,8 @@ class ALAC(OffPolicyAlgorithm):
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
-        _init_setup_model: bool = True
+        _init_setup_model: bool = True,
+        regularize: bool = False,
     ):
         super().__init__(
             policy,
@@ -138,6 +140,7 @@ class ALAC(OffPolicyAlgorithm):
 
         self.target_update_interval = target_update_interval
         self.target_entropy = target_entropy
+        self.regularize = regularize
     
         # Optimizers for the lyapunov loss lagrange variables:
         self.log_beta = th.tensor([1.0], device=self.device).requires_grad_(True)
@@ -201,19 +204,24 @@ class ALAC(OffPolicyAlgorithm):
             # Select action according to policy
             next_actions_pi, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
             # Compute the next L values
-            next_L_values = self.critic_target(replay_data.next_observations, next_actions_pi)
+
+            L_values = th.cat(self.critic_target(replay_data.observations, replay_data.actions), dim=1)
+            L_values, _ = th.max(L_values, dim=1, keepdim=True)
+            next_L_values = th.cat(self.critic_target(replay_data.next_observations, next_actions_pi), dim=1)
+            next_L_values, _ = th.max(next_L_values, dim=1, keepdim=True)
             
             # td error
             target_L_values = -replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_L_values.detach()
-
             # Get current L-values estimates for each critic network
             # using action from the replay buffer
             current_L_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
-            critic_loss = 0.5 * F.mse_loss(current_L_values, target_L_values)
+            critic_loss = 0.5 * sum(F.mse_loss(current_L, target_L_values) for current_L in current_L_values)
+            if self.regularize:
+                critic_loss += compute_gradient_penalty(self.critic, replay_data.observations, replay_data.actions, lambda_gp=1e-5)
             assert isinstance(critic_loss, th.Tensor)  # for type checker
-            critic_losses.append(critic_loss.item())  # type: ignore[union-attr]
+            critic_losses.append(critic_loss.item())   # type: ignore[union-attr]
 
             # Optimize the critic
             self.critic.optimizer.zero_grad()
@@ -226,12 +234,12 @@ class ALAC(OffPolicyAlgorithm):
 
             k = 1 - llambda.detach().item()
             lam = min(llambda.detach().item(), self.gamma)
-            delta_L = next_L_values - current_L_values.detach() + k*(current_L_values.detach() - lam*next_L_values)
+            delta_L = next_L_values - L_values.detach() + k*(L_values.detach() - lam*next_L_values)
 
             # Compute actor loss, i.e. solve the inner min problem of the lagrangian:
             actor_loss = th.mean(
                 beta.detach()*log_prob
-                + llambda.detach()*next_L_values
+                + llambda.detach()*delta_L
             )
             self.actor.optimizer.zero_grad()
             actor_loss.backward()

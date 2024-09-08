@@ -97,12 +97,81 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         achieved_hdg_data = achieved[:, 2:4]
         desired_hdg_data = desired[:, 2:4]
 
-        encoded_tensor_list = [pos_residual, achieved_hdg_data, desired_hdg_data, achieved[:, 4:7]] #, obs]
+        encoded_tensor_list = [pos_residual, achieved_hdg_data, desired_hdg_data, obs]
         encoded_tensor_list = torch.cat(encoded_tensor_list, dim=1)
 
         goal_delta = desired - achieved
 
         return encoded_tensor_list, goal_delta
+
+
+def compute_gradient_penalty(model, obs_dict, action, lambda_gp=10.0, noise_scale_obs=None, noise_scale_action=None):
+    """
+    Computes the gradient penalty with per-dimension uniform noise scaling for smoothness in a model with multiple Q-networks.
+    The observation is a dictionary, which is processed by a feature extractor.
+
+    Parameters:
+    - model: The model whose gradients we want to penalize.
+    - obs_dict: The observations dictionary (states) tensor.
+    - action: The actions tensor.
+    - lambda_gp: The penalty coefficient (default: 10.0).
+    - noise_scale_obs: Tensor or array of scales for each dimension of extracted features (default: None).
+    - noise_scale_action: Tensor or array of scales for each dimension of action (default: None).
+
+    Returns:
+    - gradient_penalty: The computed gradient penalty.
+    """
+
+    # Step 1: Extract features from the observation dictionary
+    with torch.no_grad():
+        features, delta_goal = model.extract_features(obs_dict, model.features_extractor)
+
+    # Step 2: Set default noise scales if not provided
+    if noise_scale_obs is None:
+        noise_scale_obs = torch.tensor([10, 10, 1, 1, 1, 1, 0.7, np.deg2rad(33), 3], dtype=torch.float32).to(model.device)
+    if noise_scale_action is None:
+        noise_scale_action = torch.tensor([np.deg2rad(33), 0.01], dtype=torch.float32).to(model.device)
+
+    # Expand noise_scale to match the batch size for element-wise multiplication
+    noise_scale_obs = noise_scale_obs.unsqueeze(0).expand_as(features)  # Shape becomes [n_data, features_dim]
+    noise_scale_action = noise_scale_action.unsqueeze(0).expand_as(action)  # Shape becomes [n_data, action_dim]
+
+    # Step 3: Add per-dimension uniform noise to the extracted features and actions
+    features_noise = noise_scale_obs * (torch.rand_like(features) * 2 - 1)
+    action_noise = noise_scale_action * (torch.rand_like(action) * 2 - 1)
+
+    # Require gradients on the noisy inputs
+    features_noise.requires_grad_(True)
+    action_noise.requires_grad_(True)
+
+    # Step 4: Forward pass through the model (multiple Q-networks) using the noisy features
+    qvalue_input = torch.cat([features_noise, action_noise], dim=1)
+    model_outputs = [q_net(qvalue_input)**2 for q_net in model.q_networks]
+
+    gradient_penalty = 0
+    for model_output in model_outputs:
+        # Compute the gradients with respect to the noisy inputs
+        gradients = torch.autograd.grad(
+            outputs=model_output,
+            inputs=[features_noise, action_noise],
+            grad_outputs=torch.ones_like(model_output),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True
+        )
+
+        # Combine gradients for both features and action
+        gradients = torch.cat([gradients[0].view(gradients[0].size(0), -1),
+                            gradients[1].view(gradients[1].size(0), -1)], dim=1)
+
+        # Compute the gradient norm
+        gradient_norm = torch.sqrt(torch.sum(gradients ** 2, dim=1) + 1e-12)
+
+        # Compute the gradient penalty
+        gradient_penalty += lambda_gp * ((gradient_norm - 1) ** 2).mean()
+
+    # Average the gradient penalty over all Q-networks
+    return gradient_penalty / len(model_outputs)
 
 
 def rotate_image(image, angle, p_rot):
@@ -160,7 +229,7 @@ class AvantRenderer:
         self.rear_gray_image = pygame.transform.scale(rear_gray_image, (avant_scale_factor*rear_gray_image.get_width(), avant_scale_factor*rear_gray_image.get_height()))
 
 
-    def render(self, state: np.ndarray, goal: np.ndarray, horizon: np.ndarray = np.empty([]), obstacles: np.ndarray = np.empty([])):
+    def render(self, state: np.ndarray, goal: np.ndarray, horizon: np.ndarray = np.empty([]), obstacles: np.ndarray = np.empty([]), comparision: np.ndarray = np.empty([])):
         x_f = state[0]
         y_f = state[1]
         theta_f = state[2]
@@ -221,12 +290,36 @@ class AvantRenderer:
                            radius=5)
 
         # During evaluation, draw the obstacles, if provided:
-        if len(obstacles):
-            for j in range(len(obstacles)):
-                x_o, y_o, r_o = obstacles[j]
-                pygame.draw.circle(draw_surf, self.BLACK,
-                                center=(center + pos_to_pixel_scaler*(x_o), center + pos_to_pixel_scaler*(y_o)),
-                                radius=pos_to_pixel_scaler*r_o)
+        for j in range(len(obstacles)):
+            x_o, y_o, r_o = obstacles[j]
+            pygame.draw.circle(surf, self.BLACK,
+                            center=(center + pos_to_pixel_scaler*(x_o), center + pos_to_pixel_scaler*(y_o)),
+                            radius=pos_to_pixel_scaler*r_o)
+            
+        # During evaluation, draw the comparision, if provided:
+        for j in range(len(comparision)):
+            x_f_val, y_f_val, theta_f_val, beta_val = comparision[j, :4]
+            draw_surf = alpha_surf
+            # Black magic to shift the image correctly given the kinematics:
+            x_off = pos_to_pixel_scaler*(
+                x_f_val - np.cos(theta_f_val) * np.cos(beta_val/4)*self.HALF_MACHINE_LENGTH/2 
+                - np.sin(theta_f_val) * np.sin(beta_val/4)*self.HALF_MACHINE_LENGTH/2 
+            )
+            y_off = pos_to_pixel_scaler*(
+                y_f_val - np.sin(theta_f_val) * np.cos(beta_val/4)*self.HALF_MACHINE_LENGTH/2 
+                + np.cos(theta_f_val) * np.sin(beta_val/4)*self.HALF_MACHINE_LENGTH/2 
+            )
+            rotated_image, final_position = rotate_image(self.rear_gray_image, np.rad2deg(theta_f_val + beta_val + np.pi/2), self.rear_center_offset.tolist())
+            draw_surf.blit(rotated_image, 
+                        (center + x_off - final_position[0], 
+                            center + y_off - final_position[1]))
+            rotated_image, final_position = rotate_image(self.front_gray_image, np.rad2deg(theta_f_val + np.pi/2), self.front_center_offset.tolist())
+            draw_surf.blit(rotated_image, 
+                        (center + x_off - final_position[0], 
+                            center + y_off - final_position[1]))
+            pygame.draw.circle(draw_surf, self.RED,
+                            center=(center + pos_to_pixel_scaler*(x_f_val), center + pos_to_pixel_scaler*(y_f_val)),
+                            radius=5)
 
         # During evaluation, draw the prediction horizon, if provided:
         if len(horizon):

@@ -1,214 +1,207 @@
+import sys
 import numpy as np
-import casadi as cs
-import pygame
-import torch
-import time
-import config
+import json
+import matplotlib.pyplot as plt
+from PyQt6 import QtWidgets
+from tqdm import tqdm
+from multiprocessing import Queue, Process, Event
 from argparse import ArgumentParser
 from sparse_to_dense_reward.avant_goal_env import AvantGoalEnv
-from mpc_solvers.mpc_problem import SymbolicMPCProblem
-from mpc_solvers.casadi_collocation_solver import CasadiCollocationSolver
+from sparse_to_dense_reward.qtplot import QtPlot
 from mpc_solvers.acados_solver import AcadosSolver
-from avant_modeling.gp import GPModel
+from eval_helpers import MPCActor, TrajectoryPlanner, make_eval_plots
+from sparse_to_dense_reward.utils import AvantRenderer
 
-class MPCActor:
-    def __init__(self, solver_class, device):
-        super().__init__()
-        self.device = device
-        self.history = []
-        fake_inf = 1e7
-        
-        self.gp_dict = {}
-        for name in ["delayed_u_steer", "delayed_u_gas"]:
-            data_x = torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_inputs.pth").to(device)
-            data_y = torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_targets.pth").to(device)
-            gp = GPModel(data_x, data_y, train_epochs=0, device=device).to(device)
-            gp.load_state_dict(torch.load(f"sparse_to_dense_reward/{name}/{name}_gp_model.pth"))
-            self.gp_dict[name] = gp
-        
-        # States
-        x_f = cs.MX.sym("x_f")
-        y_f = cs.MX.sym("y_f")
-        theta_f = cs.MX.sym("theta_f")
-        beta = cs.MX.sym("beta")
-        dot_beta_ref = cs.MX.sym("dot_beta_ref")
-        v_f_ref = cs.MX.sym("v_f_ref")
+MACHINE_RADIUS = 0.8
 
-        ocp_x = cs.vertcat(x_f, y_f, theta_f, beta, dot_beta_ref, v_f_ref)
-        lbx_vec = np.array([
-            -fake_inf, -fake_inf, -fake_inf, -config.avant_max_beta, -config.avant_max_dot_beta,
-            config.avant_min_v
-        ])
-        ubx_vec = np.array([
-            fake_inf, fake_inf, fake_inf, config.avant_max_beta, config.avant_max_dot_beta, 
-            config.avant_max_v
-        ])
-        ocp_x_slacks = {3: 100, 4: 100, 5: 100}
+def launch_qt_window(frame_size, data_queue, exit_event):
+    app = QtWidgets.QApplication(sys.argv)
+    plot = QtPlot(frame_size, data_queue, exit_event)
+    plot.show()
+    app.exec()  # Blocks until window is closed
+    if not exit_event.is_set():
+        exit_event.set()
 
-        # Controls
-        dot_dot_beta = cs.MX.sym("dot_dot_beta")
-        a_f = cs.MX.sym("a_f")
-        ocp_u = cs.vertcat(dot_dot_beta, a_f)
-        lbu_vec = np.array([
-            -config.avant_max_dot_dot_beta, -config.avant_max_a
-        ])
-        ubu_vec = np.array([
-            config.avant_max_dot_dot_beta, config.avant_max_a,
-        ])
-
-        # Params
-        x_goal = cs.MX.sym("x_goal")
-        y_goal = cs.MX.sym("y_goal")
-        theta_goal = cs.MX.sym("y_goal")
-        ocp_p = cs.vertcat(x_goal, y_goal, theta_goal)
-
-        # Continuous dynamics:
-        omega_f = -(
-            (config.avant_lr * dot_beta_ref + v_f_ref * cs.sin(beta)) 
-            / (config.avant_lf * cs.cos(beta) + config.avant_lr)
-        )
-        f_expr = cs.vertcat(
-            v_f_ref * cs.cos(theta_f),
-            v_f_ref * cs.sin(theta_f),
-            omega_f,
-            dot_beta_ref,
-            dot_dot_beta,
-            a_f
-        )
-        f = cs.Function('f', [ocp_x, ocp_u, ocp_p], [f_expr])
-
-        # accel_penalty = 1e-3*dot_dot_beta**2 + 1e-3*a_f**2
-        # standstill_turning_penalty = (1 - cs.tanh(v_f_ref**2 / 0.05)) * (dot_beta_ref)**2
-        l = cs.Function('l', [ocp_x, ocp_u, ocp_p], [0])
-
-        self.problem = SymbolicMPCProblem(
-            N=10,
-            h=0.1,
-            input_delay=0.0,
-            ocp_x=ocp_x,
-            lbx_vec=lbx_vec,
-            ubx_vec=ubx_vec,
-            ocp_x_slacks=ocp_x_slacks,
-            ocp_u=ocp_u,
-            lbu_vec=lbu_vec,
-            ubu_vec=ubu_vec,
-            ocp_p=ocp_p,
-            dynamics_fun=f, 
-            stage_cost_fun=l
-        )
- 
-        # Terminal cost with Q network:
-        critic_stage_state = cs.vertcat(
-            x_goal - x_f,       y_goal - y_f,    
-            cs.sin(theta_f),    cs.cos(theta_f), 
-            cs.sin(theta_goal), cs.cos(theta_goal), 
-            beta, dot_beta_ref, v_f_ref, 
-            dot_dot_beta / config.avant_max_dot_dot_beta, a_f / config.avant_max_a
-        )
-        critic_terminal_state = cs.vertcat(
-            x_goal - x_f,       y_goal - y_f,    
-            cs.sin(theta_f),    cs.cos(theta_f), 
-            cs.sin(theta_goal), cs.cos(theta_goal), 
-            beta, dot_beta_ref, v_f_ref, 
-            0, 0
-        )
-        critic_model = torch.load("avant_critic").eval()
-        self.problem.add_stage_neural_cost(model=critic_model, model_state=critic_stage_state)
-        self.problem.add_terminal_neural_cost(model=critic_model, model_state=critic_terminal_state)
-
-        self.solver = solver_class(self.problem, rebuild=True)
-
-    def reset(self):
-        pass            
-
-    def _compute_machine_controls(self, x: np.ndarray):
-        beta = x[3]
-        dot_beta = x[4]
-        v_f = x[5]
-
-        with torch.no_grad():
-            gp_input = torch.tensor([beta, dot_beta, v_f], dtype=torch.float32).unsqueeze(0).to(self.device)
-            steer = self.gp_dict["delayed_u_steer"](gp_input).mean.cpu().numpy()[0]
-            gas = self.gp_dict["delayed_u_gas"](gp_input).mean.cpu().numpy()[0]
-
-        return steer, gas
-
-    def act(self, observation) -> np.ndarray:
-        obs = observation["observation"][0][:3]
-        achieved_goal = observation["achieved_goal"][0]
-        achieved_goal = np.r_[achieved_goal[:2], np.arctan2(achieved_goal[2], achieved_goal[3])]
-        obs = np.r_[achieved_goal, obs]
-
-        # Extract x, y, theta:
-        desired_goal = observation["desired_goal"][0]
-        desired_goal = np.r_[desired_goal[:2], np.arctan2(desired_goal[2], desired_goal[3])]
-        params = [desired_goal for _ in range(self.solver.N + 1)]
-        
-        t1 = time.time_ns()
-
-        sol_x, sol_u, sol = self.solver.solve(obs, params)
-        t_s = self.problem.ocp_x_to_terminal_state_fun(obs, params[0])
-        t_v = self.problem.terminal_cost_fun(t_s, params[0])
-        controls = self._compute_machine_controls(sol_x[1, :])
-
-        t2 = time.time_ns()
-        self.history.append((t2-t1)/1e6)
-        print(t_v, np.asarray(self.history).mean())
-
-        return controls, sol_x[2:, :4]
-    
-
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("--solver", type=str)
-    parser.add_argument("--scenario-file", type=str)
-    parser.add_argument("--cuda", action="store_true")
-    args = parser.parse_args()
-
-    if args.solver == "casadi_collocation":
-        solver_class = CasadiCollocationSolver
-    elif args.solver == "acados":
-        solver_class = AcadosSolver
+def rl_env_test_loop(scenario_file, device, rebuild):
+    scenario_given = scenario_file is not None
+    if scenario_given:
+        with open(scenario_file, "r") as f:
+            scenario = json.load(f)
+            initial_pose = np.asarray([scenario["pose"]], dtype=np.float32)
+            goal_pose = np.asarray([scenario["goal_pose"]], dtype=np.float32)
+            obstacles = np.asarray(scenario["obstacles"], dtype=np.float32)
     else:
-        raise ValueError(f"Unknown solver {args.solver}")
-    device = "cuda:0" if args.cuda else "cpu"
-    actor = MPCActor(solver_class=solver_class, device=device)
+        obstacles = []
+
+    actor = MPCActor(solver_class=AcadosSolver, device=device, obstacles=obstacles)
+    trajectory_planner = TrajectoryPlanner(rebuild=rebuild, obstacles=obstacles) # To compare against
 
     # Initialize environment and actor
-    env = AvantGoalEnv(num_envs=1, dt=0.01, time_limit_s=30, device='cpu', eval=True)
-    screen = pygame.display.set_mode([env.renderer.RENDER_RESOLUTION, env.renderer.RENDER_RESOLUTION])
+    env = AvantGoalEnv(num_envs=1, dt=0.01, time_limit_s=30, device='cpu', eval=True, eval_input_delay=False)
 
-    # Frame rate and corresponding real-time frame duration
-    frame_rate = 30
-    normal_frame_duration_ms = 1000 // frame_rate
-    frame_duration_ms = normal_frame_duration_ms
-
-    # Main simulation loop
-    obs = env.reset()
+    # Initialize the plotter
+    data_queue = Queue()
+    exit_event = Event()
+    import atexit
+    def stop():
+        exit_event.set()
+    atexit.register(stop)
+    plot_process = Process(target=launch_qt_window, args=(env.renderer.RENDER_RESOLUTION, data_queue, exit_event))
+    plot_process.start()
 
     history = []
-    while True:
-        for _ in pygame.event.get():
-            pass
-        start_ticks = pygame.time.get_ticks()  # Get the start time of the current frame
 
-        action, horizon = actor.act(obs)
+    if scenario_given:
+        obs = env.reset(initial_pose, goal_pose)   
+        comparision, comparision_time = np.empty(0), 0 #trajectory_planner.plan(obs)
+    else:     
+        obs = env.reset()
+        comparision, comparision_time = [], 0
+
+    while True:
+        if exit_event.is_set():
+            break
+
+        action, horizon, solve_time, lyapunov_value = actor.act(obs)
+        horizon = horizon[:, :4]
         action /= env.dynamics.control_scalers.cpu().numpy()
+
+        if scenario_given:
+            history.append(np.r_[horizon[0], lyapunov_value])
         
-        # Substep for more accuracy:
+        # Substep euler physics for more accuracy:
         for i in range(10):
             obs, reward, done, _ = env.step(action.reshape(1, -1).astype(np.float32))
             if done:
                 break
 
         if done:
-            actor.reset()
+            if scenario_given:
+                exit_event.set()
+                break
+            else:
+                actor.reset()
 
-        frame = env.render(mode='rgb_array', horizon=horizon, indices=[0])
-        pygame.surfarray.blit_array(screen, frame.transpose(1, 0, 2))
-        pygame.display.flip()
+        frame = env.render(indices=[0], mode='rgb_array', horizon=horizon[1:], obstacles=obstacles, comparision=comparision)
+        data_queue.put((solve_time, lyapunov_value, frame))
 
-        # Ensure each frame lasts long enough to simulate 0.25x speed
-        elapsed = pygame.time.get_ticks() - start_ticks
-        if elapsed < frame_duration_ms:
-            pygame.time.delay(frame_duration_ms - elapsed)
+    if scenario_given:
+        history = np.asarray(history)
+        make_eval_plots(history, comparision, comparision_time, scenario_file)
+
+
+def stability_test_loop(device):
+    renderer = AvantRenderer(6)
+    actor = MPCActor(solver_class=AcadosSolver, device=device)
+
+    data_queue = Queue()
+    exit_event = Event()
+    import atexit
+    def stop():
+        exit_event.set()
+    atexit.register(stop)
+    plot_process = Process(target=launch_qt_window, args=(1280, data_queue, exit_event))
+    plot_process.start()
+
+    goals = []
+    distances = [4.5, 9]
+    angles = [0, 1/4*np.pi, 2/4*np.pi, 3/4*np.pi, np.pi, 5/4*np.pi, 6/4*np.pi, 7/4*np.pi]
+    for dist in distances:
+        for offset in angles:
+            for goal_heading in angles:
+                goals.append([dist * np.cos(offset), dist * np.sin(offset), goal_heading])
+    goals = np.asarray(goals)
+    print(f"N GOALS: {len(goals)}")
+
+    def is_done(x, goal):
+        achieved_hdg = x[2]
+        desired_hdg = goal[2]
+        hdg_error = np.arctan2(np.sin(achieved_hdg - desired_hdg), np.cos(achieved_hdg - desired_hdg))
+        e = np.r_[x[:2] - goal[:2], hdg_error]
+        return np.linalg.norm(e) < 0.1
+
+    lyapunov_rate_values = []
+    time_to_goals = []
+    succesful_scenarios = np.repeat(False, len(goals))
+    g_i = 0
+    for goal in tqdm(goals):
+        current_rate_values = []
+        x = np.zeros(6)
+        last_lyapunov_value = None
+        success = False
+        for i in range(int(30 / actor.problem.h)):
+            if exit_event.is_set():
+                return
+
+            if is_done(x, goal):
+                success = True
+                break
+
+            _, horizon, solve_time, lyapunov_value = actor.solve(x, goal)
+            x = horizon[1]
+            if last_lyapunov_value is not None:
+                current_rate_values.append((lyapunov_value - last_lyapunov_value) / actor.problem.h)
+            last_lyapunov_value = lyapunov_value
+
+            frame = renderer.render(state=x, goal=goal, horizon=horizon[1:, :4], obstacles=[], comparision=[])
+            data_queue.put((solve_time, lyapunov_value, frame))
+
+        if not success:
+            print("FAILED with goal", goal)
+        else:
+            lyapunov_rate_values.extend(current_rate_values)
+            succesful_scenarios[g_i] = True
+        time_to_goals.append(i*actor.problem.h)
+        g_i += 1
+
+    plt.figure(figsize=(10, 10))
+    plt.grid(True)
+    plt.gca().set_axisbelow(True)
+    plt.quiver(0, 0, 1, 0, angles='xy', scale_units='xy', scale=0.75, label="Initial pose", color="g")
+    i1 = np.argwhere(succesful_scenarios)
+    i2 = np.argwhere(~succesful_scenarios)
+    plt.quiver(goals[i1, 0], goals[i1, 1], np.cos(goals[i1, 2]), np.sin(goals[i1, 2]), angles='xy', scale_units='xy', scale=1, label="Goal poses", color="black")
+    plt.quiver(goals[i2, 0], goals[i2, 1], np.cos(goals[i2, 2]), np.sin(goals[i2, 2]), angles='xy', scale_units='xy', scale=1, label="Goal poses", color="red")
+    plt.xlim(-10, 10)
+    plt.ylim(-10, 10)
+    plt.xticks([-9, -6, -3, 0, 3, 6, 9])
+    plt.yticks([-9, -6, -3, 0, 3, 6, 9])
+    plt.xlabel('X', fontsize=20)
+    plt.ylabel('Y', fontsize=20)
+    # plt.title('')
+    plt.legend(prop={'size': 20})
+    plt.tight_layout()
+    plt.gca().tick_params(labelsize=20)
+    plt.gca().set_aspect('equal', adjustable='box')
+    plt.savefig("empirical_scenarios.svg")
+
+    print(len(lyapunov_rate_values))
+    lyapunov_rate_values = np.asarray(lyapunov_rate_values)
+    print(np.amin(lyapunov_rate_values), np.amax(lyapunov_rate_values))
+    lyapunov_rate_values = np.clip(lyapunov_rate_values, -50, 50)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    plt.grid(True)
+    ax.hist(lyapunov_rate_values, bins=100)
+    plt.tight_layout()
+    plt.savefig(f"lyapunov_rates_hist.svg", bbox_inches='tight')
+    plt.close()
+
+def main():
+    parser = ArgumentParser()
+    parser.add_argument("--scenario-file", type=str)
+    parser.add_argument("--cuda", action="store_true")
+    parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--stability", action="store_true")
+    args = parser.parse_args()
+
+    device = "cuda:0" if args.cuda else "cpu"
+
+    if not args.stability:
+        rl_env_test_loop(args.scenario_file, device, args.rebuild)
+    else: 
+        stability_test_loop(device)
+
+
+if __name__ == "__main__":
+    main()

@@ -87,18 +87,19 @@ class AvantDynamics:
                 self.gp_dict[name] = gp
 
     # Simple kinematic model with direct control of accelerations, used to train RL policy
-    def _rl_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
+    def _rl_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor, add_noise=True) -> torch.Tensor:
         def continuous_dynamics(x_values: torch.Tensor, u_values: torch.Tensor):
             u_values = self.control_scalers * u_values
 
             desired_beta_accel = u_values[:, self.u_dot_dot_beta_idx]
             desired_linear_accel = u_values[:, self.u_a_f_idx]
 
-            # Add some noise to the resulting accelerations
-            std_beta_accel = 1/2 * (0.5*config.avant_max_dot_dot_beta) / (config.avant_max_beta**2 + config.avant_max_dot_beta**2) * (x_values[:, self.beta_idx]**2 + x_values[:, self.dot_beta_idx]**2)
-            desired_beta_accel += torch.normal(mean=0, std=std_beta_accel)
-            std_linear_accel = 1/2 * (0.5*config.avant_max_a) / (config.avant_max_v**2) * (x_values[:, self.v_f_idx]**2)
-            desired_linear_accel += torch.normal(mean=0, std=std_linear_accel)
+            if add_noise:
+                # Add some noise to the resulting accelerations
+                std_beta_accel = 1/2 * (0.5*config.avant_max_dot_dot_beta) / (config.avant_max_beta**2 + config.avant_max_dot_beta**2) * (x_values[:, self.beta_idx]**2 + x_values[:, self.dot_beta_idx]**2)
+                desired_beta_accel += torch.normal(mean=0, std=std_beta_accel)
+                std_linear_accel = 1/2 * (0.5*config.avant_max_a) / (config.avant_max_v**2) * (x_values[:, self.v_f_idx]**2)
+                desired_linear_accel += torch.normal(mean=0, std=std_linear_accel)
 
             # Limit the resulting accelerations
             limited_beta_accel = torch.max(
@@ -116,12 +117,8 @@ class AvantDynamics:
                 -config.avant_max_a * torch.ones_like(desired_linear_accel).to(u_values.device)
             )
 
-            # To avoid accumulating beta even at the joint limit, we scale the dot_beta accordingly:
-            distance_to_limit = config.avant_max_beta - torch.abs(x_values[:, self.beta_idx])
-            scaling_factor = torch.min(distance_to_limit / (torch.abs(x_values[:, self.dot_beta_idx]) * self.dt + 1e-5), torch.tensor(1.0).to(x_values.device))
-
             omega_f = -(
-                (config.avant_lr * scaling_factor * x_values[:, self.dot_beta_idx] + x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.beta_idx])) 
+                (config.avant_lr * x_values[:, self.dot_beta_idx] + x_values[:, self.v_f_idx] * torch.sin(x_values[:, self.beta_idx])) 
                 / (config.avant_lf * torch.cos(x_values[:, self.beta_idx]) + config.avant_lr)
             )
             dot_state = torch.vstack([
@@ -179,7 +176,7 @@ class AvantDynamics:
             gp_v_f = self.gp_dict["truncated_v_f"](gp_v_f_inputs).mean
             v_f = gp_v_f
 
-            # Nominal and GP for dot_dot_beta        
+            # Nominal and GP for dot_beta        
             gp_dot_beta_inputs = torch.vstack([
                 x_values[:, self.beta_idx], v_f, u_values[:, self.u_steer_idx]
             ]).T
@@ -206,7 +203,6 @@ class AvantDynamics:
             gp_omega_f = self.gp_dict["omega_f"](gp_omega_f_inputs).rsample(torch.Size([1]))
             omega_f = gp_omega_f
 
-            # Nominal and GP for v_f
             gp_v_f_inputs = torch.vstack([
                 x_values[:, self.beta_idx], x_values[:, self.dot_beta_idx], x_values[:, self.throttle_del1_idx]
             ]).T
@@ -261,7 +257,7 @@ class AvantDynamics:
 
     def discrete_dynamics_fun(self, x_values: torch.Tensor, u_values: torch.Tensor) -> torch.Tensor:
         if not self.eval:
-            return self._rl_dynamics_fun(x_values, u_values)
+            return self._rl_dynamics_fun(x_values, u_values, add_noise=False)
         else:
             with torch.no_grad():
                 return self._mpc_dynamics_fun(x_values, u_values)

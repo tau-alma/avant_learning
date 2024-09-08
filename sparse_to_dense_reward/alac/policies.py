@@ -16,7 +16,7 @@ from stable_baselines3.common.torch_layers import (
 )
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
 
-from sparse_to_dense_reward.alac.utils import LyapunovCritic
+from sparse_to_dense_reward.alac.utils import SquaredContinuousCritic
 
 
 # CAP the standard deviation of the actor
@@ -208,15 +208,14 @@ class ALACPolicy(BasePolicy):
     """
 
     actor: Actor
-    critic: LyapunovCritic
-    critic_target: LyapunovCritic
+    critic: SquaredContinuousCritic
+    critic_target: SquaredContinuousCritic
 
     def __init__(
         self,
         observation_space: spaces.Space,
         action_space: spaces.Box,
         lr_schedule: Schedule,
-        num_critic_out: int,
         net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
         use_sde: bool = False,
@@ -228,6 +227,7 @@ class ALACPolicy(BasePolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
+        n_critics: int = 2,
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -267,9 +267,9 @@ class ALACPolicy(BasePolicy):
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
             {
+                "n_critics": n_critics,
                 "net_arch": critic_arch,
                 "share_features_extractor": share_features_extractor,
-                "num_out": num_critic_out
             }
         )
 
@@ -281,7 +281,7 @@ class ALACPolicy(BasePolicy):
         self.actor = self.make_actor()
         self.actor.optimizer = self.optimizer_class(
             self.actor.parameters(),
-            lr=lr_schedule(1),  # type: ignore[call-arg]
+            lr=lr_schedule(1)/2,  # type: ignore[call-arg]
             **self.optimizer_kwargs,
         )
 
@@ -341,9 +341,9 @@ class ALACPolicy(BasePolicy):
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
         return Actor(**actor_kwargs).to(self.device)
 
-    def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> LyapunovCritic:
+    def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> SquaredContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
-        return LyapunovCritic(**critic_kwargs).to(self.device)
+        return SquaredContinuousCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> th.Tensor:
         return self._predict(obs, deterministic=deterministic)
@@ -395,7 +395,6 @@ class MultiInputPolicy(ALACPolicy):
         observation_space: spaces.Space,
         action_space: spaces.Box,
         lr_schedule: Schedule,
-        num_critic_out: int,
         net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
         use_sde: bool = False,
@@ -407,13 +406,13 @@ class MultiInputPolicy(ALACPolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
+        n_critics: int = 2,
         share_features_extractor: bool = False
     ):
         super().__init__(
             observation_space,
             action_space,
             lr_schedule,
-            num_critic_out,
             net_arch,
             activation_fn,
             use_sde,
@@ -425,5 +424,6 @@ class MultiInputPolicy(ALACPolicy):
             normalize_images,
             optimizer_class,
             optimizer_kwargs,
+            n_critics,
             share_features_extractor,
         )
