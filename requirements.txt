@@ -1,0 +1,16 @@
+
+numpy==1.25.0
+moviepy==1.0.3
+gymnasium==0.29.1
+pandas==2.2.1
+torch==2.2.2
+torchvision==0.17.2
+pygame==2.5.2
+stable_baselines3==2.3.2
+tensorboard==2.16.2
+tensorboard-data-server==0.7.2
+Pillow==9.4.0
+casadi==3.6.4
+gpytorch==1.11
+opencv-python-headless==4.11.0.86
+seaborn

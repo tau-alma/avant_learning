@@ -105,11 +105,17 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
             -sin_achieved, cos_achieved
         ], dim=1).reshape(-1, 2, 2)
         local_pos_residual = torch.bmm(rotation_matrix, pos_residual.unsqueeze(-1)).squeeze(-1)
+        # Recover the heading error from sin/cos:
         hdg_error = torch.atan2(
             sin_desired * cos_achieved - cos_desired * sin_achieved,
             cos_desired * cos_achieved + sin_desired * sin_achieved
         )
 
+        # longitudinal error
+        # lateral error
+        # sin(heading error)
+        # cos(heading error)
+        # obs
         encoded_tensor_list = [
             local_pos_residual, 
             torch.sin(hdg_error.unsqueeze(1)),
@@ -129,6 +135,7 @@ def compute_gradient_penalty(model, obs_dict, action, lambda_gp=1e-4):
 
     noise_scale_feature = features.mean(axis=0).unsqueeze(0)
     scale_action = action.mean(axis=0).unsqueeze(0)
+    # Perturb the current state and actions slightly to ensure high gradients are penalized in nearby states as well
     features_uniform = features + 0.05 * noise_scale_feature * (torch.rand_like(features) * 2 - 1)
     actions_uniform = action + 0.05 * scale_action * (torch.rand_like(action) * 2 - 1)
     features_uniform.requires_grad_(True)

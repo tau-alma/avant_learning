@@ -3,7 +3,7 @@ import numpy as np
 # Loader params:
 loader_lr = 0.985777778
 loader_lf = 1.1059
-loader_r = 1.05
+loader_r = max(loader_lf, loader_lr)
 loader_d = 2*loader_r
 
 # Loader "constraints"

@@ -52,7 +52,7 @@ model = ALAC(
 )
 
 try:
-    sd = torch.load("avant_critic").state_dict()
+    sd = torch.load("loader_critic").state_dict()
     sd2 = {}
     for k, v in sd.items():
         sd2["qf0."+k] = v
@@ -65,8 +65,8 @@ except:
     print("Couldn't load critic weights")
 
 try:
-    model.policy.actor.load_state_dict(torch.load("avant_actor"))
-    model.actor.load_state_dict(torch.load("avant_actor"))
+    model.policy.actor.load_state_dict(torch.load("loader_actor"))
+    model.actor.load_state_dict(torch.load("loader_actor"))
 except:
     print("Couldn't load actor weights")
     
@@ -112,3 +112,5 @@ for w, steps in weight_schedule:
     model.save(f"RL_outputs/{now}/lac_{int(steps/1e6)}.zip")
     model.save_replay_buffer(f"RL_outputs/{now}/lac_buffer_{int(steps/1e6)}.pkl")
     model.replay_buffer.reset() # Clear the outdated buffer with old rewards, and collect new samples in next iter
+    torch.save(model.critic.q_networks[0], "loader_critic")
+    torch.save(model.actor.state_dict(), "loader_actor")
