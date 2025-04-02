@@ -1,5 +1,5 @@
 import torch
-from loader_navigation_rl import config
+import config
 
 class KinematicLoader:
     # State indices:

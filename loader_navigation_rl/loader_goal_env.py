@@ -7,7 +7,7 @@ from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvStepRetu
 from loader_navigation_rl.kinematic_loader import KinematicLoader
 from loader_navigation_rl.utils import GoalEnv
 from loader_rendering.renderer import LoaderRenderer
-from loader_navigation_rl import config
+import config
 
 MAX_INITIAL_DISTANCE = 10
 

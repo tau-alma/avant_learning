@@ -31,23 +31,23 @@ model = ALAC(
     verbose=1,
     buffer_size=int(2e6),
     learning_starts= int(1e6),
-    learning_rate=1e-3,
+    learning_rate=1e-2,
     gradient_steps=3,
     train_freq=1,
-    gamma=0.999,
+    gamma=0.99,
     batch_size=int(3e5),
     policy_kwargs=dict(
         net_arch=dict(
-            pi=[96, 144, 96],
-            qf=[48, 96, 48],
+            pi=[96, 96, 96],
+            qf=[96, 96, 96],
         ),
         activation_fn=torch.nn.Softplus,
         share_features_extractor=True,
         features_extractor_class=CustomCombinedExtractor
     ),
     tensorboard_log="./RL_outputs/debug",
-    target_entropy=-1.5,
-    tau=0.01,
+    target_entropy=-2,
+    tau=0.05,
     lambda_gp=0.0
 )
 
@@ -72,13 +72,13 @@ except:
     
 # Critic learns a bit faster than actor:
 for g in model.policy.critic.optimizer.param_groups:
-    g['lr'] = 3e-2
+    g['lr'] = 5e-3
 for g in model.critic.optimizer.param_groups:
-    g['lr'] = 3e-2
+    g['lr'] = 5e-3
 for g in model.policy.actor.optimizer.param_groups:
-    g['lr'] = 1.5e-3
+    g['lr'] = 1e-3
 for g in model.actor.optimizer.param_groups:
-    g['lr'] = 1.5e-3
+    g['lr'] = 1e-3
 
 pos_w = 1/0.1
 hdg_w = 1/np.deg2rad(5)

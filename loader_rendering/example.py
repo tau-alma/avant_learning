@@ -3,19 +3,23 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from renderer import LoaderRenderer
 
-ar = LoaderRenderer(1080, 5, store_frames=True)
+lr = LoaderRenderer(1080, 5, store_frames=True)
 
 # Draw one frame:
-frame_static = ar.render_frame(np.array([0, 0, 0, 0]), np.array([2, 2, np.pi]), horizon=[], obstacles=[], comparision=[])
+state = np.array([0, 0, 0, 0])
+goal = np.array([2, 2, np.pi])
+frame_static = lr.render_frame(state, goal, horizon=[], obstacles=[], comparision=[])
 
 # Save a video clip and return the frames:
+# (store_frames = True -> they are stored internally for compiling a .mp4 video clip afterwards)
 for i in range(100):
     if i % 2:
-        ar.render_frame(np.array([3, -3, -np.pi/2, -0.1]), np.array([2, 2, np.pi]))
+        lr.render_frame(np.array([3, -3, -np.pi/2, -0.1]), np.array([2, 2, np.pi]))
     else:
-        ar.render_frame(np.array([-3, 3, np.pi/2, 0.1]), np.array([2, 2, np.pi]))
-frames = ar.render_video("test.mp4")
+        lr.render_frame(np.array([-3, 3, np.pi/2, 0.1]), np.array([2, 2, np.pi]))
+frames = lr.render_video("test.mp4")
 
+# Show result:
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.8, 5.4))
 im1 = ax1.imshow(frame_static)
 im2 = ax2.imshow(frames[0])

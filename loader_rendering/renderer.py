@@ -50,14 +50,14 @@ class LoaderRenderer:
         rear_image = pygame.image.load(os.path.join(package_dir, 'assets', 'rear.png'))
         front_gray_image = grayscale(front_image)
         rear_gray_image = grayscale(rear_image)
-        avant_image_pixel_scaler = np.mean([452 / self.HALF_MACHINE_LENGTH, 428 / self.HALF_MACHINE_LENGTH])
-        avant_scale_factor = pos_to_pixel_scaler / avant_image_pixel_scaler
-        self.front_center_offset = np.array([215, 430]) * avant_scale_factor
-        self.rear_center_offset = np.array([226, 0]) * avant_scale_factor
-        self.front_image = pygame.transform.scale(front_image, (avant_scale_factor*front_image.get_width(), avant_scale_factor*front_image.get_height()))
-        self.rear_image = pygame.transform.scale(rear_image, (avant_scale_factor*rear_image.get_width(), avant_scale_factor*rear_image.get_height()))
-        self.front_gray_image = pygame.transform.scale(front_gray_image, (avant_scale_factor*front_gray_image.get_width(), avant_scale_factor*front_gray_image.get_height()))
-        self.rear_gray_image = pygame.transform.scale(rear_gray_image, (avant_scale_factor*rear_gray_image.get_width(), avant_scale_factor*rear_gray_image.get_height()))
+        loader_image_pixel_scaler = np.mean([452 / self.HALF_MACHINE_LENGTH, 428 / self.HALF_MACHINE_LENGTH])
+        loader_scale_factor = pos_to_pixel_scaler / loader_image_pixel_scaler
+        self.front_center_offset = np.array([215, 430]) * loader_scale_factor # location of the center joint in pixel "coordinates", scaled
+        self.rear_center_offset = np.array([226, 0]) * loader_scale_factor    # location of the center joint in pixel "coordinates", scaled
+        self.front_image = pygame.transform.scale(front_image, (loader_scale_factor*front_image.get_width(), loader_scale_factor*front_image.get_height()))
+        self.rear_image = pygame.transform.scale(rear_image, (loader_scale_factor*rear_image.get_width(), loader_scale_factor*rear_image.get_height()))
+        self.front_gray_image = pygame.transform.scale(front_gray_image, (loader_scale_factor*front_gray_image.get_width(), loader_scale_factor*front_gray_image.get_height()))
+        self.rear_gray_image = pygame.transform.scale(rear_gray_image, (loader_scale_factor*rear_gray_image.get_width(), loader_scale_factor*rear_gray_image.get_height()))
     
     def render_video(self, filename, fps=30) -> np.ndarray:
         """ Saves the collected frames as .mp4
