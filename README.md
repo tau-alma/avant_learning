@@ -31,8 +31,8 @@ where each state is a vector with fields:
 The step function of the environment expects to receive a vector of actions: (num_envs, 2), where each action consists of:
 |  Action index  |  Description |
 |------|------|
-| 0 | scaled center joint acceleration, -1 to 1|
-| 1 | scaled linear acceleration, -1 to 1|
+| 0 | scaled center joint acceleration ($$\ddot \beta$$), -1 to 1|
+| 1 | scaled linear acceleration ($$\dot v_f$$, -1 to 1|
 
 ## ALAC RL agent
 
@@ -46,4 +46,14 @@ To train the RL agent, run the training script:
 ```bash
 python teach_loader.py
 ```
-this will commence a curriculum learning run, where the 
+this will commence a curriculum learning run, where the loader is first trained to reach a goal position, then a goal position + heading, then to terminate with zero center joint angle, and so on.
+
+The resulting RL critic can be evaluated within the Actor-Critic MPC framework by running:
+```bash
+python test_loader_MPC.py
+```
+which will start a graphical user interface, through which the user can assign goal poses by left click + drag, and instansiate obstacles by right click + drag:
+
+https://github.com/user-attachments/assets/05df6e7a-c63d-46de-8d9c-70530bd1aea6
+
+
