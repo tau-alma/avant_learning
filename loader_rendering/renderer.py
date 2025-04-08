@@ -232,7 +232,7 @@ class LoaderRenderer:
             (alpha_surf, (0, 0))
         ])
         buffer = pygame.transform.flip(self.screen, True, False)
-        buffer = pygame.surfarray.array3d(buffer)
+        buffer = pygame.surfarray.array3d(buffer).transpose(1, 0, 2)
         if self.store_frames:
             self.frames.append(buffer)
 

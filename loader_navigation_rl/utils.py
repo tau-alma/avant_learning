@@ -99,7 +99,7 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         sin_achieved, cos_achieved = achieved_hdg_data[:, 0], achieved_hdg_data[:, 1]
         sin_desired, cos_desired = desired_hdg_data[:, 0], desired_hdg_data[:, 1]
 
-        # Compute the position error in the "local" / wheel loader longitudinal and lateral axis
+        # Compute the position error in the "local" / loader longitudinal and lateral axis
         rotation_matrix = torch.stack([
             cos_achieved, sin_achieved, 
             -sin_achieved, cos_achieved
@@ -111,27 +111,20 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
             cos_desired * cos_achieved + sin_desired * sin_achieved
         )
 
-        # longitudinal error
-        # lateral error
-        # sin(heading error)
-        # cos(heading error)
-        # obs
         encoded_tensor_list = [
-            local_pos_residual, 
-            torch.sin(hdg_error.unsqueeze(1)),
-            torch.cos(hdg_error.unsqueeze(1)),
-            obs
+            local_pos_residual, # longitudinal and lateral error
+            torch.sin(hdg_error.unsqueeze(1)), # sin(heading error)
+            torch.cos(hdg_error.unsqueeze(1)), # cos(heading error)
+            obs # beta, dot_beta, lin_vel
         ]
-        encoded_tensor_list = torch.cat(encoded_tensor_list, dim=1)
+        encoded_tensors = torch.cat(encoded_tensor_list, dim=1)
 
-        goal_delta = desired - achieved
-
-        return encoded_tensor_list, goal_delta
+        return encoded_tensors
 
 
 def compute_gradient_penalty(model, obs_dict, action, lambda_gp=1e-4):
     with torch.no_grad():
-        features, delta_goal = model.extract_features(obs_dict, model.features_extractor)
+        features = model.extract_features(obs_dict, model.features_extractor)
 
     noise_scale_feature = features.mean(axis=0).unsqueeze(0)
     scale_action = action.mean(axis=0).unsqueeze(0)

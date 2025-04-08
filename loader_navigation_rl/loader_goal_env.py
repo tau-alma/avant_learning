@@ -9,7 +9,7 @@ from loader_navigation_rl.utils import GoalEnv
 from loader_rendering.renderer import LoaderRenderer
 import config
 
-MAX_INITIAL_DISTANCE = 10
+MAX_INITIAL_DISTANCE = 15
 
 class LoaderGoalEnv(VecEnv, GoalEnv):
     def __init__(self, num_envs: int, dt: float, time_limit_s: float, device: str):
@@ -133,8 +133,8 @@ class LoaderGoalEnv(VecEnv, GoalEnv):
         )
 
         # Penalize tight turns near the goal position (within 1-3 times of min turning radius) -> makes the controller less sensitive to modeling errors
-        reward -= self.cost_weights["pos_beta"]*(1-np.tanh(pos_error / (1.5*config.loader_tr))) * beta**2 
-        reward -= self.cost_weights["pos_dot_beta"]*(1-np.tanh(pos_error/ (3*config.loader_tr))) * dot_beta**2 
+        reward -= self.cost_weights["pos_beta"]*(1-np.tanh(pos_error / (1*config.loader_tr))) * beta**2 
+        reward -= self.cost_weights["pos_dot_beta"]*(1-np.tanh(pos_error/ (2*config.loader_tr))) * dot_beta**2 
 
         done = ((np.sqrt(pos_error) < 0.1) 
                 & ((self.cost_weights["hdg"] == 0) | (180/np.pi * np.abs(hdg_error) < 2.5)) 
@@ -157,7 +157,6 @@ class LoaderGoalEnv(VecEnv, GoalEnv):
         info = [{} for i in range(self.num_envs)]
         tmp_obs = self._construct_observation()
         reward = self.compute_reward(tmp_obs["achieved_goal"], tmp_obs["desired_goal"], info)
-
         terminated = torch.from_numpy(reward > -1e-3).to(self.device)
         truncated = (self.num_steps > self.time_limit_s / self.dynamics.dt)
         done = terminated | truncated        
@@ -188,7 +187,7 @@ class LoaderGoalEnv(VecEnv, GoalEnv):
 
     def _internal_reset(self, indices: torch.Tensor):
         N_SAMPLES = len(indices)
-        radii_uniform = torch.distributions.Beta(2.0, 2.0).sample((N_SAMPLES,)) * MAX_INITIAL_DISTANCE
+        radii_uniform = torch.distributions.Uniform(0, MAX_INITIAL_DISTANCE).sample((N_SAMPLES,))
         angles_uniform = torch.distributions.Uniform(0, 2 * torch.pi).sample((N_SAMPLES,))
         orientations_uniform = torch.distributions.Uniform(0, 2 * torch.pi).sample((N_SAMPLES,))
 

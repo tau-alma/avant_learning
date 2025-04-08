@@ -115,7 +115,7 @@ class SquaredContinuousCritic(BaseModel):
         # Learn the features extractor using the policy loss only
         # when the features_extractor is shared with the actor
         with th.set_grad_enabled(not self.share_features_extractor):
-            features, _ = self.extract_features(obs, self.features_extractor)
+            features = self.extract_features(obs, self.features_extractor)
             
         qvalue_input = th.cat([features, actions], dim=1)
         q_values = [q_net(qvalue_input)**2 for q_net in self.q_networks]
