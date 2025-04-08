@@ -71,7 +71,7 @@ encoded_tensors = torch.cat(encoded_tensor_list, dim=1)
 i.e. the position error has been transformed into the coordinate frame of the loader front body unit, and the heading error has been encoded using sine and cosine values.
 
 When using the critic as a MPC cost function, two things need to be considered:
-1. By default, the [feature extractor](loader_navigation_rl/utils) is not saved as part of the critic, therefore the correct input vector to be manually constructed in the MPC formulation (as shown in the [example](test_loader_mpc.py))
+1. By default, the [feature extractor](loader_navigation_rl/utils) is not saved as part of the critic, therefore the correct input vector needs to be manually constructed in the MPC formulation (as shown in the [example](test_loader_mpc.py))
 2. The critic output needs to be "manually" squared (this is done automatically within the [SymbolicMPCProblem](https://github.com/tau-alma/ACMPC-solvers/blob/master/mpc_problem.py) class)
 
 
