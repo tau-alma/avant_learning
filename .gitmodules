@@ -1,3 +1,4 @@
 [submodule "mpc_solvers"]
 	path = mpc_solvers
-	url = git@github.com:tau-alma/ACMPC-solvers.git
+	url = git@github.com:trouverun/ACMPC-solvers.git
+	branch = master
