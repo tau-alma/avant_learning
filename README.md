@@ -1,4 +1,4 @@
-# Avant_learning
+# loader_learning
 This repository contains the codes needed to train an [Adaptive Lyapunov-based Actor-Critic](https://openreview.net/pdf?id=rOCWUmMBSnH) agent to solve a wheel loader pose reaching task.
 
 
