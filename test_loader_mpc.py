@@ -8,7 +8,7 @@ from queue import Empty
 from PyQt6 import QtWidgets, QtGui, QtCore
 from multiprocessing import Process, Queue, Event
 from mpc_solvers.mpc_problem import SymbolicMPCProblem, SymbolicMPCSolver
-from mpc_solvers.acados_sqp_solver import AcadosSolver
+from mpc_solvers.acados_sqp_solver import AcadosSQPSolver
 from loader_rendering.renderer import LoaderRenderer
 
 
@@ -238,7 +238,7 @@ class ImageWindow(QtWidgets.QLabel):
     
 def main_loop(res, dist, max_n_obstacles, goal_queue, obstacle_queue, frame_queue, event):
     lr = LoaderRenderer(res, dist, False)
-    actor = MPCActor(AcadosSolver, mpc_n=20, num_obstacles=max_n_obstacles)
+    actor = MPCActor(AcadosSQPSolver, mpc_n=20, num_obstacles=max_n_obstacles)
 
     x = np.zeros(6)
     goal = np.zeros(3)
